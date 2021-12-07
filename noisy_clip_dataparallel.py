@@ -155,12 +155,15 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(512,100)
+        self.random_on_clean = torch.randn(100,20)
+
+        self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
+        self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
 
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer = torch.nn.Linear(512,100)
+        self.extra_layer = torch.nn.Linear(512,20)
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -296,8 +299,14 @@ class NoisyCLIP(LightningModule):
             embed_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, embed_dim]
         """
         image_clean, image_noisy, labels = train_batch
-        embed_clean = torch.matmul(self.baseclip.encode_image(image_clean), self.random_on_clean.to(image_clean.device))
+        embed_clean = self.baseclip.encode_image(image_clean)
+        embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
+        embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+        embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
+        
         embed_noisy = self.encode_noisy_image(image_noisy)
+        embed_noisy = embed_noisy / embed_noisy.norm(dim=-1, keepdim=True)
+        
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
 
     def training_step_end(self, outputs):
