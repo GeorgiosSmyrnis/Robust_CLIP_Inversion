@@ -1,4 +1,5 @@
 import numpy as np
+import cvxpy as cp
 import torch
 import torchvision.transforms as transforms
 import torchvision
@@ -8,6 +9,19 @@ from torch.utils.data.dataset import Dataset, Subset
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import make_dataset
 
+
+def solve_lasso_on_simplex(X, y, alpha=1.0):
+    """
+    X: n_samples * n_features
+    y: n_samples
+    """
+    
+    w = cp.Variable(x.shape[1])
+    objective = cp.Minimize(cp.sum_squares(X @ w - y) + alpha*cp.norm1(w))
+    constraints = [w >= 0, cp.sum(w) == 1]
+    prob = cp.Problem(objective, constraints)
+    prob.solve()
+    return w.value
 
 def convnoise(x, epoch=None):
     """
