@@ -173,7 +173,7 @@ class NoisyCLIP(LightningModule):
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
 
-    def criterion(self, input1, input2, reduction='mean'):
+    def criterion(self, input1, input2):
         """
         Args:
             input1: Embeddings of the clean/noisy images from the teacher/student. Size [N, embedding_dim].
@@ -187,12 +187,13 @@ class NoisyCLIP(LightningModule):
         
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
-            return F.cross_entropy(input2, input1)
+            target = input1
+            image_probs = F.softmax(input2, dim=-1, keepdim=True)
+            loss = - (1/input1.shape[0]) * torch.sum(image_probs * target)
+            return loss
 
         else:
             raise ValueError('Loss function not understood.')
-
-        return loss/bsz if reduction == 'mean' else loss
 
 
     def configure_optimizers(self):
