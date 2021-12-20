@@ -221,9 +221,11 @@ class NoisyCLIP(LightningModule):
 
         #Take the simple MSE between the clean and noisy embeddings
         elif self.hparams.loss_type == 'mse':
-            avg_norm_teacher = torch.mean(torch.norm(input1, dim=1))
-            avg_norm_student = torch.mean(torch.norm(input2, dim=1))
             return F.mse_loss(input2, input1)
+        
+        #Cross entropy between clean and noisy logits.
+        elif self.hparams.loss_type == 'cross':
+            return F.cross_entropy(input2, input1)
 
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
