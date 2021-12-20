@@ -172,6 +172,9 @@ class NoisyCLIP(LightningModule):
         self.train_top_5 = Accuracy(top_k=5)
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
+        
+        # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth). Currently hard-coded.
+        self.training_labels = 'truth'
 
     def criterion(self, input1, input2):
         """
@@ -187,10 +190,11 @@ class NoisyCLIP(LightningModule):
         
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
-            target = input1
-            image_probs = F.softmax(input2, dim=-1, keepdim=True)
-            loss = - (1/input1.shape[0]) * torch.sum(image_probs * target)
-            return loss
+            # target = input1
+            # image_probs = F.softmax(input2, dim=-1, keepdim=True)
+            # loss = - (1/input1.shape[0]) * torch.sum(image_probs * target)
+            # return loss
+            return F.cross_entropy(input2, input1)
 
         else:
             raise ValueError('Loss function not understood.')
@@ -242,10 +246,14 @@ class NoisyCLIP(LightningModule):
             embed_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, embed_dim]
         """
         image_clean, image_noisy, labels = train_batch
-        embed_clean = self.baseclip.encode_image(image_clean)
-        embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
-        embed_clean = self.logit_scale * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
-        embed_clean = F.softmax(embed_clean, dim=-1)
+        
+        if self.training_labels == 'clip':
+            embed_clean = self.baseclip.encode_image(image_clean)
+            embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
+            embed_clean = self.logit_scale * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+            embed_clean = F.softmax(embed_clean, dim=-1)
+        elif self.training_labels == 'truth':
+            embed_clean = labels.to(image_clean.device)
         embed_noisy = self.encode_noisy_image(image_noisy)
         
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
