@@ -356,13 +356,9 @@ def run_noisy_clip():
         version=args.experiment_name,
         name='NoisyCLIP_Logs'
     )
-    if not hasattr(args, 'increasing') or not args.increasing:
-        trainer = Trainer.from_argparse_args(args, logger=logger)
-        trainer.fit(model, datamodule=dataset)
-    else:
-        trainer = Trainer.from_argparse_args(args, logger=logger, reload_dataloaders_every_epoch=True, callbacks=[ModelCheckpoint(save_top_k=-1, period=25)], val_percent_check=0, num_sanity_val_steps=0)
-        trainer.fit(model)
-
+    trainer = Trainer.from_argparse_args(args, logger=logger)
+    trainer.fit(model, datamodule=dataset)
+    
 def grab_config():
     parser = argparse.ArgumentParser(description="NoisyCLIP")
 
