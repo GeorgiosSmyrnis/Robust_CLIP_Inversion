@@ -14,7 +14,7 @@ distortion: "randommask"
 fixed_mask: False
 percent_missing: 0.9
 
-lr: 0.001
+lr: 0.0003
 weight_decay: 0.0001
 loss_tau: 0.1
 logit_scale: 0.07
@@ -26,7 +26,7 @@ subset_file_name: "imagenet100.txt"
 dataset_dir: "/tmp/imagenet100"
 logdir: "/tmp"
 mapping_and_text_file: "./mapping_text_labels_imagenet100.pkl"
-save_mapping_and_text: False
+save_mapping_and_text: True
 
 batch_size: 256
 

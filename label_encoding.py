@@ -165,7 +165,9 @@ class NoisyCLIP(LightningModule):
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer = torch.nn.Linear(512,100)
+        self.extra_layer = torch.nn.Linear(512,100, bias=False)
+        with torch.no_grad():
+            self.extra_layer.weight.copy_(self.text_features.T)
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -174,7 +176,7 @@ class NoisyCLIP(LightningModule):
         self.val_top_5 = Accuracy(top_k=5)
         
         # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth). Currently hard-coded.
-        self.training_labels = 'truth'
+        self.training_labels = 'clip'
 
     def criterion(self, input1, input2):
         """
@@ -183,18 +185,16 @@ class NoisyCLIP(LightningModule):
             input2: Embeddings of the clean/noisy images from the teacher/student (the ones not used as input1). Size [N, embedding_dim].
             reduction: how to scale the final loss
         """
-        bsz = input1.shape[0]
 
         if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
         
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
-            # target = input1
-            # image_probs = F.softmax(input2, dim=-1, keepdim=True)
-            # loss = - (1/input1.shape[0]) * torch.sum(image_probs * target)
-            # return loss
-            return F.cross_entropy(input2, input1)
+            target = input1
+            log_exp_frac = F.log_softmax(input2, dim=-1)
+            loss = - (1/input1.shape[0]) * torch.sum(log_exp_frac * target)
+            return loss
 
         else:
             raise ValueError('Loss function not understood.')
@@ -250,7 +250,7 @@ class NoisyCLIP(LightningModule):
         if self.training_labels == 'clip':
             embed_clean = self.baseclip.encode_image(image_clean)
             embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
-            embed_clean = self.logit_scale * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+            embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
             embed_clean = F.softmax(embed_clean, dim=-1)
         elif self.training_labels == 'truth':
             embed_clean = labels.to(image_clean.device)
@@ -266,9 +266,6 @@ class NoisyCLIP(LightningModule):
         embed_noisy_full = outputs['embed_noisy']
         loss = self.criterion(embed_clean_full, embed_noisy_full)
         self.log('train_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-        self.log('mean_clean', embed_clean_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-        self.log('mean_noisy', embed_noisy_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-
         return loss
 
     # Validation methods - here we are concerned with similarity between noisy image embeddings and classification text embeddings.
@@ -280,7 +277,7 @@ class NoisyCLIP(LightningModule):
 
         images_noisy, labels = test_batch
         if batch_idx == 0 and self.current_epoch < 1:
-           self.logger.experiment.add_image('Val_Sample', img_grid(images_noisy), self.current_epoch)
+            self.logger.experiment.add_image('Val_Sample', img_grid(images_noisy), self.current_epoch)
         image_probs = self.encode_noisy_image(images_noisy)
         return {'image_probs': image_probs, 'labels': labels}
     
@@ -324,25 +321,25 @@ class NoisyCLIP(LightningModule):
         return train_dataloader
 
     def val_dataloader(self):
-       if hasattr(self.hparams, 'increasing') and self.hparams.increasing:
-           datatf = ImageNetDistortVal(self.hparams, epoch=self.current_epoch)
-       else:
-           datatf = self.val_set_transform
-    
-       val_dataset = ImageNet100(
-           root=self.hparams.dataset_dir,
-           split = 'val',
-           transform = datatf
-       )
-       self.N_val = len(val_dataset)
-    
-       val_dataloader = DataLoader(val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.workers,\
-                                       pin_memory=True, shuffle=False)
-    
-       return val_dataloader
+        if hasattr(self.hparams, 'increasing') and self.hparams.increasing:
+            datatf = ImageNetDistortVal(self.hparams, epoch=self.current_epoch)
+        else:
+            datatf = self.val_set_transform
+     
+        val_dataset = ImageNet100(
+            root=self.hparams.dataset_dir,
+            split = 'val',
+            transform = datatf
+        )
+        self.N_val = len(val_dataset)
+     
+        val_dataloader = DataLoader(val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.workers,\
+                                        pin_memory=True, shuffle=False)
+     
+        return val_dataloader
     
     def test_dataloader(self):
-       return self.val_dataloader()
+        return self.val_dataloader()
 
 
 def run_noisy_clip():
