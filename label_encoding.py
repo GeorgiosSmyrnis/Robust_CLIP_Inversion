@@ -16,27 +16,6 @@ from pytorch_lightning.metrics import Accuracy
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data  import DataLoader
 
-class ContrastiveUnsupervisedDataset(torch.utils.data.Dataset):
-    """
-    This class takes a dataset and creates a contrastive version of that dataset.
-    Each item of the dataset is a tuple of a clean image and a noisy image (two
-    separate transformations.)
-    """
-    def __init__(self, clean_dataset, transform_contrastive=None, return_label=False):
-        self.base = clean_dataset
-        self.transform_contrastive = transform_contrastive
-        self.return_label = return_label
-
-    def __len__(self):
-        return len(self.base)
-
-    def __getitem__(self, idx):
-        image_orig, label = self.base[idx]
-        image_clean, image_noisy = self.transform_contrastive(image_orig) if self.transform_contrastive is not None else (image_orig, image_orig)
-        if self.return_label:
-            return image_clean, image_noisy, label
-        else:
-            return image_clean, image_noisy
 
 class ImageNetCLIPDataset(LightningDataModule):
     """
@@ -155,7 +134,6 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        # self.random_on_clean = torch.randn(100,20)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -219,9 +197,11 @@ class NoisyCLIP(LightningModule):
 
         #Take the simple MSE between the clean and noisy embeddings
         elif self.hparams.loss_type == 'mse':
-            avg_norm_teacher = torch.mean(torch.norm(input1, dim=1))
-            avg_norm_student = torch.mean(torch.norm(input2, dim=1))
             return F.mse_loss(input2, input1)
+        
+        #Cross-entropy between clean and noisy logits
+        elif self.hparams.loss_type == 'cross':
+            return F.cross_entropy(input2, input1)
 
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
@@ -302,8 +282,8 @@ class NoisyCLIP(LightningModule):
         image_clean, image_noisy, labels = train_batch
         embed_clean = self.baseclip.encode_image(image_clean)
         embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
+        embed_clean = self.logit_scale * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
         embed_clean = F.softmax(embed_clean, dim=-1)
-        embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
         embed_noisy = self.encode_noisy_image(image_noisy)
         
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
