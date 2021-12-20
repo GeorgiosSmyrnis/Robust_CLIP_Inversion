@@ -155,15 +155,16 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(100,20)
+        self.random_on_clean = torch.randn(100,10)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
+        self.text_features = self.text_features.T
 
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer = torch.nn.Linear(512,20)
+        self.extra_layer = torch.nn.Linear(512,10)
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -302,10 +303,11 @@ class NoisyCLIP(LightningModule):
         embed_clean = self.baseclip.encode_image(image_clean)
         embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
         embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+        embed_clean = F.softmax(embed_clean, dim=-1)
         embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
         
         embed_noisy = self.encode_noisy_image(image_noisy)
-        embed_noisy = embed_noisy / embed_noisy.norm(dim=-1, keepdim=True)
+        #embed_noisy = embed_noisy / embed_noisy.norm(dim=-1, keepdim=True)
         
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
 
@@ -317,6 +319,8 @@ class NoisyCLIP(LightningModule):
         embed_noisy_full = outputs['embed_noisy']
         loss = self.criterion(embed_clean_full, embed_noisy_full)
         self.log('train_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=True, on_epoch=True)
+        self.log('mean_clean', embed_clean_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
+        self.log('mean_noisy', embed_noisy_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
         return loss
 
     # Validation methods - here we are concerned with similarity between noisy image embeddings and classification text embeddings.

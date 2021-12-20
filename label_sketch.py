@@ -302,11 +302,11 @@ class NoisyCLIP(LightningModule):
             embed_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, embed_dim]
         """
         image_clean, image_noisy, labels = train_batch
-        embed_clean = self.baseclip.encode_image(image_clean)
-        embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
-        embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
-        embed_clean = F.softmax(embed_clean, dim=-1)
-        embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
+        #embed_clean = self.baseclip.encode_image(image_clean)
+        #embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
+        #embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+        #embed_clean = F.softmax(embed_clean, dim=-1)
+        embed_clean = torch.matmul(F.one_hot(labels, num_classes=100).float(), self.random_on_clean.to(image_clean.device))
         
         embed_noisy = self.encode_noisy_image(image_noisy)
         
@@ -346,14 +346,13 @@ class NoisyCLIP(LightningModule):
        label_sketch = outputs['label_sketch']
        labels_full = outputs['labels']
     
-       image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[1])
+       image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
     
        for i in range(label_sketch.shape[0]):
-           solver = Lasso(fit_intercept=False)
-           solver.fit(self.random_on_clean.detach().cpu().numpy(), label_sketch[i].detach().cpu().numpy())
-           image_probs[i,:] = torch.FloatTensor(solver.coef_)
+           image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), labels_full[i].detach().cpu().numpy()))
     
-       image_probs = image_probs / image_probs.norm(dim=-1, keepdim=True)
+       #image_probs = image_probs / image_probs.sum(dim=-1, keepdim=True)
+       image_probs = F.softmax(image_probs, dim=-1).to(labels_full.device)
        self.log('val_top_1_step', self.val_top_1(image_probs, labels_full), prog_bar=False, logger=False)
        self.log('val_top_5_step', self.val_top_5(image_probs, labels_full), prog_bar=False, logger=False)
     
@@ -425,7 +424,7 @@ def run_noisy_clip():
         trainer = Trainer.from_argparse_args(args, logger=logger)
         trainer.fit(model, datamodule=dataset)
     else:
-        trainer = Trainer.from_argparse_args(args, logger=logger, reload_dataloaders_every_epoch=True, callbacks=[ModelCheckpoint(save_top_k=-1, period=25)], val_percent_check=0, num_sanity_val_steps=0)
+        trainer = Trainer.from_argparse_args(args, logger=logger, reload_dataloaders_every_epoch=True, callbacks=[ModelCheckpoint(save_top_k=-1, period=25)])
         trainer.fit(model)
 
 def grab_config():

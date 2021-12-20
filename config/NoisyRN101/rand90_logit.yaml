@@ -1,6 +1,6 @@
 seed: 1234
 
-experiment_name: "randmany_mse"
+experiment_name: "rand90_logit"
 
 num_nodes: 1
 gpus: 4
@@ -14,7 +14,7 @@ distortion: "randommask"
 fixed_mask: False
 percent_missing: 0.9
 
-lr: 0.0003
+lr: 0.001
 weight_decay: 0.0001
 loss_tau: 0.1
 logit_scale: 0.07
@@ -35,8 +35,8 @@ workers: 12
 distributed_backend: "dp"
 
 #training
-max_epochs: 1
-log_save_interval: 1 #set this to be equal to num_epochs if row_log_interval is 1
+max_epochs: 10
+log_save_interval: 10 #set this to be equal to num_epochs if row_log_interval is 1
 row_log_interval: 1
 sync_bn: True
 

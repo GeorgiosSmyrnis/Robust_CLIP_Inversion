@@ -332,7 +332,6 @@ class NoisyCLIP(LightningModule):
         if batch_idx == 0 and self.current_epoch < 1:
            self.logger.experiment.add_image('Val_Sample', img_grid(images_noisy), self.current_epoch)
         image_probs = self.encode_noisy_image(images_noisy)
-        image_probs = image_probs / image_probs.norm(dim=-1, keepdim=True)
         return {'image_probs': image_probs, 'labels': labels}
     
     def validation_step_end(self, outputs):
@@ -342,6 +341,7 @@ class NoisyCLIP(LightningModule):
         """
         image_probs = outputs['image_probs']
         labels_full = outputs['labels']
+        image_probs = F.softmax(image_probs, dim=-1)
         self.log('val_top_1_step', self.val_top_1(image_probs, labels_full), prog_bar=False, logger=False)
         self.log('val_top_5_step', self.val_top_5(image_probs, labels_full), prog_bar=False, logger=False)
     

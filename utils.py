@@ -16,7 +16,7 @@ def solve_lasso_on_simplex(X, y, alpha=1.0):
     y: n_samples
     """
     
-    w = cp.Variable(x.shape[1])
+    w = cp.Variable(X.shape[1])
     objective = cp.Minimize(cp.sum_squares(X @ w - y) + alpha*cp.norm1(w))
     constraints = [w >= 0, cp.sum(w) == 1]
     prob = cp.Problem(objective, constraints)
