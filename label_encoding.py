@@ -16,7 +16,29 @@ from pytorch_lightning.metrics import Accuracy
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data  import DataLoader
 
+class ContrastiveUnsupervisedDataset(torch.utils.data.Dataset):
+    """
+    This class takes a dataset and creates a contrastive version of that dataset.
+    Each item of the dataset is a tuple of a clean image and a noisy image (two
+    separate transformations.)
+    """
+    def __init__(self, clean_dataset, transform_contrastive=None, return_label=False):
+        self.base = clean_dataset
+        self.transform_contrastive = transform_contrastive
+        self.return_label = return_label
 
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, idx):
+        image_orig, label = self.base[idx]
+        image_clean, image_noisy = self.transform_contrastive(image_orig) if self.transform_contrastive is not None else (image_orig, image_orig)
+        if self.return_label:
+            return image_clean, image_noisy, label
+        else:
+            return image_clean, image_noisy
+            
+            
 class ImageNetCLIPDataset(LightningDataModule):
     """
     Wrapper class for the ImageNet dataset, handles all data manipulations
@@ -135,6 +157,7 @@ class NoisyCLIP(LightningModule):
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
 
+        # Save the text features for classification based on our dataset.
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
         self.text_features = self.text_features.T
@@ -159,74 +182,12 @@ class NoisyCLIP(LightningModule):
         """
         bsz = input1.shape[0]
 
-        # Use the simclr style InfoNCE
-        if self.hparams.loss_type == 'simclr':
-            # Create similarity matrix between embeddings.
-            full_tensor = torch.cat([input1.unsqueeze(1),input2.unsqueeze(1)], dim=1).view(2*bsz, -1)
-            #tensor1 = full_tensor.expand(2*bsz,2*bsz,-1)
-            #tensor2 = full_tensor.permute(1,0,2).expand(2*bsz,2*bsz,-1)
-            #sim_mat = torch.nn.CosineSimilarity(dim=-1)(tensor1,tensor2)
-            full_tensor = full_tensor / full_tensor.norm(dim=-1, keepdim=True)
-            sim_mat = full_tensor @ full_tensor.t()
-            print(torch.sum(sim_mat < 0))
-            # Calculate logits used for the contrastive loss.
-            exp_sim_mat = torch.exp(sim_mat/self.hparams.loss_tau)
-            mask = torch.ones_like(exp_sim_mat) - torch.eye(2*bsz).type_as(exp_sim_mat)
-            logmat = -torch.log(exp_sim_mat)+torch.log(torch.sum(mask*exp_sim_mat, 1))
-
-            #Grab the two off-diagonal similarities
-            part1 = torch.sum(torch.diag(logmat, diagonal=1)[np.arange(0,2*bsz,2)])
-            part2 = torch.sum(torch.diag(logmat, diagonal=-1)[np.arange(0,2*bsz,2)])
-
-            #Take the mean of the two off-diagonals
-            loss = (part1 + part2)/2
-
-        #Use the CLIP-style InfoNCE
-        elif self.hparams.loss_type == 'clip':
-            # Create similarity matrix between embeddings.
-            tensor1 = input1 / input1.norm(dim=-1, keepdim=True)
-            tensor2 = input2 / input2.norm(dim=-1, keepdim=True)
-            sim_mat = (1/self.hparams.loss_tau)*tensor1 @ tensor2.t()
-
-            #Calculate the cross entropy between the similarities of the positive pairs, counted two ways
-            part1 = F.cross_entropy(sim_mat, torch.LongTensor(np.arange(bsz)).to(self.device))
-            part2 = F.cross_entropy(sim_mat.t(), torch.LongTensor(np.arange(bsz)).to(self.device))
-
-            #Take the mean of the two off-diagonals
-            loss = (part1+part2)/2
-
-        #Take the simple MSE between the clean and noisy embeddings
-        elif self.hparams.loss_type == 'mse':
+        if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
         
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
             return F.cross_entropy(input2, input1)
-
-        elif self.hparams.loss_type.startswith('simclr_'):
-            assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
-            # Various schemes for the negative examples
-            teacher_embeds = F.normalize(input1, dim=1)
-            student_embeds = F.normalize(input2, dim=1)
-            # First compute positive examples by taking <S(x_i), T(x_i)>/T for all i
-            pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hparams.loss_tau
-            # Then generate the negative term by constructing various similarity matrices
-            if self.hparams.loss_type == 'simclr_ss':
-                cov = torch.mm(student_embeds, student_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
-            elif self.hparams.loss_type == 'simclr_st':
-                cov = torch.mm(student_embeds, teacher_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1)) # Not removing the diagonal here!
-            else:
-                cat_embeds = torch.cat([student_embeds, teacher_embeds])
-                cov = torch.mm(student_embeds, cat_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, 2 * bsz]
-                # and take row-wise sums w/o diagonals and
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
-            # Final loss is
-            loss = -1 * (pos_term - neg_term).sum() # (summed and then mean-reduced later)
 
         else:
             raise ValueError('Loss function not understood.')
