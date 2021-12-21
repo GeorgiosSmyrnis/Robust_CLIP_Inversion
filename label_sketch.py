@@ -165,6 +165,7 @@ class NoisyCLIP(LightningModule):
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
         self.text_features = self.text_features.T
+        self.text_features = self.text_features.requires_grad_(False) # Is this what's broken?
 
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
@@ -186,7 +187,7 @@ class NoisyCLIP(LightningModule):
         self.train_top_5 = Accuracy(top_k=5)
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
-        
+
         # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth). Currently hard-coded.
         self.training_labels = 'clip'
 
@@ -197,10 +198,10 @@ class NoisyCLIP(LightningModule):
             input2: Embeddings of the clean/noisy images from the teacher/student (the ones not used as input1). Size [N, embedding_dim].
             reduction: how to scale the final loss
         """
-        
+
         if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
-        
+
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
             target = input1
@@ -260,18 +261,19 @@ class NoisyCLIP(LightningModule):
             embed_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, embed_dim]
         """
         image_clean, image_noisy, labels = train_batch
-        
+
         if self.training_labels == 'clip':
-            embed_clean = self.baseclip.encode_image(image_clean)
-            embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
-            embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
-            embed_clean = F.softmax(embed_clean, dim=-1)
-            embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
+            with torch.no_grad():
+                embed_clean = self.baseclip.encode_image(image_clean)
+                embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
+                embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
+                embed_clean = F.softmax(embed_clean, dim=-1)
+                embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
         elif self.training_labels == 'truth':
             embed_clean = torch.matmul(F.one_hot(labels, num_classes=100).float(), self.random_on_clean.to(image_clean.device))
-        
+
         embed_noisy = self.encode_noisy_image(image_noisy)
-        
+
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
 
     def training_step_end(self, outputs):
@@ -293,13 +295,13 @@ class NoisyCLIP(LightningModule):
        Grab the noisy image embeddings: S(yi), where S() is the student and yi = Distort(xi). Done on each GPU.
        Return these to be evaluated in validation step end.
        """
-       
+
        images_noisy, labels = test_batch
        if batch_idx == 0 and self.current_epoch < 1:
            self.logger.experiment.add_image('Val_Sample', img_grid(images_noisy), self.current_epoch)
        label_sketch = self.encode_noisy_image(images_noisy)
        return {'label_sketch': label_sketch, 'labels': labels}
-    
+
     def validation_step_end(self, outputs):
        """
        Gather the noisy image features and their labels from each GPU.
@@ -307,17 +309,17 @@ class NoisyCLIP(LightningModule):
        """
        label_sketch = outputs['label_sketch']
        labels_full = outputs['labels']
-    
+
        image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
-    
+
        for i in range(label_sketch.shape[0]):
            image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
-    
+
        #image_probs = image_probs / image_probs.sum(dim=-1, keepdim=True)
        image_probs = F.softmax(image_probs, dim=-1).to(labels_full.device)
        self.log('val_top_1_step', self.val_top_1(image_probs, labels_full), prog_bar=False, logger=False)
        self.log('val_top_5_step', self.val_top_5(image_probs, labels_full), prog_bar=False, logger=False)
-    
+
     def validation_epoch_end(self, outputs):
        """
        Gather the zero-shot validation accuracies from across GPUs and reduce.
@@ -351,19 +353,19 @@ class NoisyCLIP(LightningModule):
            datatf = ImageNetDistortVal(self.hparams, epoch=self.current_epoch)
        else:
            datatf = self.val_set_transform
-    
+
        val_dataset = ImageNet100(
            root=self.hparams.dataset_dir,
            split = 'val',
            transform = datatf
        )
        self.N_val = len(val_dataset)
-    
+
        val_dataloader = DataLoader(val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.workers,\
                                        pin_memory=True, shuffle=False)
-    
+
        return val_dataloader
-    
+
     def test_dataloader(self):
        return self.val_dataloader()
 
@@ -384,7 +386,7 @@ def run_noisy_clip():
     )
     trainer = Trainer.from_argparse_args(args, logger=logger)
     trainer.fit(model, datamodule=dataset)
-    
+
 def grab_config():
     parser = argparse.ArgumentParser(description="NoisyCLIP")
 
