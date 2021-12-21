@@ -211,6 +211,7 @@ class NoisyCLIP(LightningModule):
         Return S(yi) where S() is the student network and yi is distorted images.
         """
         y = self.noisy_visual_encoder(image.type(torch.float16))
+        y = y / y.norm(dim=-1, keepdim=True)
         return self.extra_layer(y)
 
     def forward(self, image_features, text=None):
@@ -254,7 +255,9 @@ class NoisyCLIP(LightningModule):
             embed_clean = F.softmax(embed_clean, dim=-1)
         elif self.training_labels == 'truth':
             embed_clean = labels.to(image_clean.device)
+            
         embed_noisy = self.encode_noisy_image(image_noisy)
+        embed_noisy = F.softmax(embed_noisy, dim=-1)
         
         return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
 
