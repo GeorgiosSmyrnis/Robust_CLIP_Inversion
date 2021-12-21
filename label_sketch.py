@@ -84,7 +84,10 @@ class ImageNetCLIPDataset(LightningDataModule):
         filename = self.hparams.dataset_dir + self.hparams.subset_file_name
 
         # Get the subset, as well as its labels as text.
-        text_labels = list(train_data.idx_to_class.values())
+        text_labels = []
+        for i in range(100):
+            text_labels.append(train_data.idx_to_class[i])
+        # text_labels = list(train_data.idx_to_class.values())
 
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
@@ -128,7 +131,7 @@ class NoisyCLIP(LightningModule):
                 raise ValueError('No file from which to read text labels was specified.')
 
             text_labels = pickle.load(open(self.hparams.mapping_and_text_file, 'rb'))
-            self.text_list = ['A photo of '+label.strip().replace('_',' ') for label in text_labels]
+            self.text_list = ['A photo of a '+label.strip().replace('_',' ') for label in text_labels]
         else:
             raise NotImplementedError('Handling of the dataset not implemented yet.')
 
@@ -157,7 +160,7 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(100,10)
+        self.random_on_clean = torch.randn(100,20)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -166,7 +169,17 @@ class NoisyCLIP(LightningModule):
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer = torch.nn.Linear(512,10,bias=False)
+        self.extra_layer_1 = torch.nn.Linear(512,100,bias=False)
+        self.extra_layer_2 = torch.nn.Linear(100,20,bias=False)
+        with torch.no_grad():
+            self.extra_layer_1.weight.copy_(self.text_features.T)
+            self.extra_layer_2.weight.copy_(self.random_on_clean.T)
+
+        for p  in self.extra_layer_1.parameters():
+            p.requires_grad = False
+
+        for p  in self.extra_layer_2.parameters():
+            p.requires_grad = False
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -209,7 +222,10 @@ class NoisyCLIP(LightningModule):
         Return S(yi) where S() is the student network and yi is distorted images.
         """
         y = self.noisy_visual_encoder(image.type(torch.float16))
-        return self.extra_layer(y)
+        y = y / y.norm(dim=-1, keepdim=True)
+        y = self.extra_layer_1(y)
+        y = F.softmax(y, dim=-1)
+        return self.extra_layer_2(y)
 
     def forward(self, image_features, text=None):
         """
@@ -251,7 +267,7 @@ class NoisyCLIP(LightningModule):
             embed_clean = torch.matmul(embed_clean, self.text_features.to(image_clean.device))
             embed_clean = F.softmax(embed_clean, dim=-1)
             embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
-        elif self.training_labels == 'mse':
+        elif self.training_labels == 'truth':
             embed_clean = torch.matmul(F.one_hot(labels, num_classes=100).float(), self.random_on_clean.to(image_clean.device))
         
         embed_noisy = self.encode_noisy_image(image_noisy)
@@ -295,7 +311,7 @@ class NoisyCLIP(LightningModule):
        image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
     
        for i in range(label_sketch.shape[0]):
-           image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), labels_full[i].detach().cpu().numpy()))
+           image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
     
        #image_probs = image_probs / image_probs.sum(dim=-1, keepdim=True)
        image_probs = F.softmax(image_probs, dim=-1).to(labels_full.device)
