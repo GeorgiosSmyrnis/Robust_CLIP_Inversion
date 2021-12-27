@@ -108,15 +108,8 @@ class ImageNetCLIPDataset(LightningDataModule):
 class NoisyCLIP(LightningModule):
     def __init__(self, args):
         """
-        A class that trains OpenAI CLIP in a student-teacher fashion to classify distorted images.
-
-        Given two identical pre-trained networks, Teacher - T() and Student S(), we freeze T() and train S().
-
-        Given a batch of {x1, x2, ..., xN}, apply a given distortion to each one to obtain noisy images {y1, y2, ..., yN}.
-
-        Feed original images to T() and obtain embeddings {T(x1), ..., T(xN)} and feed distorted images to S() and obtain embeddings {S(y1), ..., S(yN)}.
-
-        Maximize the similarity between the pairs {(T(x1), S(y1)), ..., (T(xN), S(yN))} while minimizing the similarity between all non-matched pairs.
+        This class trains a student to produce logit sketches which approximate those provided by a teacher model.
+        These label skethes are then used to retrieve the predicted labels for the input images.
         """
         super(NoisyCLIP, self).__init__()
         self.hparams = args
@@ -186,9 +179,6 @@ class NoisyCLIP(LightningModule):
         self.train_top_5 = Accuracy(top_k=5)
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
-
-        # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth).
-        self.training_labels = 
 
     def criterion(self, input1, input2):
         """
@@ -261,13 +251,19 @@ class NoisyCLIP(LightningModule):
         # 1) Retrieve the logit sketches for the images
         label_sketch = self.encode_noisy_image(images)
         
-        # 2) Solve a lasso reconstruction to retrieve the actual logits.
-        image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
-        for i in range(label_sketch.shape[0]):
-            image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
-       
-        # 3) apply softmax to force summation to 1.
-        out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
+        if self.hparams.reconstruction == 'lasso':
+            # 2) Solve a lasso reconstruction to retrieve the actual logits.
+            image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
+            for i in range(label_sketch.shape[0]):
+                image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
+           
+            # 3) apply softmax to force summation to 1.
+            out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
+            
+        elif self.hparams.reconstruction == 'adjoint':
+            # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
+            out = torch.matmul(label_sketch, self.random_on_clean.T)
+            
         return out
         
 
