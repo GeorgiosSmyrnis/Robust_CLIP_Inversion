@@ -10,7 +10,7 @@ from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import make_dataset
 
 
-def solve_lasso_on_simplex(X, y, alpha=10.0):
+def solve_lasso_on_simplex(X, y, alpha=0.1):
     """
     X: n_samples * n_features
     y: n_samples

@@ -160,7 +160,7 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(100,50)
+        self.random_on_clean = torch.randn(100,20)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -170,17 +170,17 @@ class NoisyCLIP(LightningModule):
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer_1 = torch.nn.Linear(512,50,bias=False)
-        #self.extra_layer_2 = torch.nn.Linear(100,50,bias=False)
+        self.extra_layer_1 = torch.nn.Linear(512,100,bias=False)
+        self.extra_layer_2 = torch.nn.Linear(100,20,bias=False)
         with torch.no_grad():
-            self.extra_layer_1.weight.copy_((self.text_features @ self.random_on_clean).T)
-        #    self.extra_layer_2.weight.copy_(self.random_on_clean.T)
+            self.extra_layer_1.weight.copy_(self.text_features.T)
+            self.extra_layer_2.weight.copy_(self.random_on_clean.T)
 
-        #for p  in self.extra_layer_1.parameters():
-        #    p.requires_grad = False
+        for p  in self.extra_layer_1.parameters():
+            p.requires_grad = False
 
-        #for p  in self.extra_layer_2.parameters():
-        #    p.requires_grad = False
+        for p  in self.extra_layer_2.parameters():
+            p.requires_grad = False
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -192,9 +192,9 @@ class NoisyCLIP(LightningModule):
         self.training_labels = 'clip'
 
         # Sharpening of logits:
-        self.sharpening = 1e3
+        self.sharpening = 1.0
 
-    def criterion(self, input1, input2):
+    def criterion(self, input1, input2, reduction='mean'):
         """
         Args:
             input1: Embeddings of the clean/noisy images from the teacher/student. Size [N, embedding_dim].
@@ -204,41 +204,13 @@ class NoisyCLIP(LightningModule):
         
         if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
-       
-        elif self.hparams.loss_type == 'l1':
-            return F.l1_loss(input2, input1)
- 
+        
         #Cross-entropy between clean and noisy logits
         elif self.hparams.loss_type == 'cross':
             target = input1
             log_exp_frac = F.log_softmax(input2, dim=-1)
             loss = - (1/input1.shape[0]) * torch.sum(log_exp_frac * target)
             return loss
-
-        elif self.hparams.loss_type.startswith('simclr_'):
-            assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
-            # Various schemes for the negative examples
-            teacher_embeds = input1
-            student_embeds = input2
-            # First compute positive examples by taking <S(x_i), T(x_i)>/T for all i
-            pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hparams.loss_tau
-            # Then generate the negative term by constructing various similarity matrices
-            if self.hparams.loss_type == 'simclr_ss':
-                cov = torch.mm(student_embeds, student_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
-            elif self.hparams.loss_type == 'simclr_st':
-                cov = torch.mm(student_embeds, teacher_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1)) # Not removing the diagonal here!
-            else:
-                cat_embeds = torch.cat([student_embeds, teacher_embeds])
-                cov = torch.mm(student_embeds, cat_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, 2 * bsz]
-                # and take row-wise sums w/o diagonals and
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
-            # Final loss is
-            loss = -1 * (pos_term - neg_term).mean() # (summed and mean-reduced)
 
         else:
             raise ValueError('Loss function not understood.')
@@ -255,10 +227,10 @@ class NoisyCLIP(LightningModule):
         """
         y = self.noisy_visual_encoder(image.type(torch.float16))
         y = y / y.norm(dim=-1, keepdim=True)
-        #y = self.sharpening * self.extra_layer_1(y)
-        #y = F.softmax(y, dim=-1)
-        #return self.extra_layer_2(y)
-        return self.extra_layer_1(y)
+        y = self.sharpening * self.extra_layer_1(y)
+        y = F.relu(y)
+        y = y / y.sum(dim=-1, keepdim=True)
+        return self.extra_layer_2(y)
 
     def forward(self, image_features, text=None):
         """
@@ -299,14 +271,15 @@ class NoisyCLIP(LightningModule):
                 embed_clean = self.baseclip.encode_image(image_clean.type(torch.float16))
                 embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
                 embed_clean = self.sharpening * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
-                embed_clean = F.softmax(embed_clean, dim=-1)
-                #temp = embed_clean
+                temp = embed_clean
+                embed_clean = F.relu(embed_clean)
+                embed_clean = embed_clean / embed_clean.sum(dim=-1, keepdim=True)
                 embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
             elif self.training_labels == 'truth':
                 embed_clean = torch.matmul(F.one_hot(labels, num_classes=100).float(), self.random_on_clean.to(image_clean.device))
         
 
-        #print(torch.sum(torch.topk(temp, 10, dim=-1)[0], dim=-1).mean()) 
+        print((torch.sum(torch.topk(torch.abs(temp), 10, dim=-1)[0], dim=-1)/torch.sum(torch.abs(temp), dim=-1, keepdim=True)).mean()) 
         embed_noisy = self.encode_noisy_image(image_noisy)
         #print(torch.norm(image_clean-image_noisy, dim=(-2,-1)).mean())
         #if batch_idx < 4:
