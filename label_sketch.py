@@ -155,12 +155,18 @@ class NoisyCLIP(LightningModule):
                 else:
                     self.val_set_transform = ImageNetDistortVal(self.hparams)
 
+        if self.hparams.baseclip_type.startswith('RN'):
+            embed_size = 512
+        else:
+            raise NotImplementedError('Unknown embedding size.')
+
+
         #(2) set up the teacher CLIP network - freeze it and don't use gradients!
         self.logit_scale = self.hparams.logit_scale
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(100,50)
+        self.random_on_clean = torch.randn(self.hparams.num_classes, self.hparams.sketch_size)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -170,49 +176,36 @@ class NoisyCLIP(LightningModule):
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        self.extra_layer_1 = torch.nn.Linear(512,50,bias=False)
-        #self.extra_layer_2 = torch.nn.Linear(100,50,bias=False)
+        
+        self.extra_layer_1 = torch.nn.Linear(embed_size, self.hparams.sketch_size,bias=False)
         with torch.no_grad():
-            self.extra_layer_1.weight.copy_((self.text_features @ self.random_on_clean).T)
-        #    self.extra_layer_2.weight.copy_(self.random_on_clean.T)
-
-        #for p  in self.extra_layer_1.parameters():
-        #    p.requires_grad = False
-
-        #for p  in self.extra_layer_2.parameters():
-        #    p.requires_grad = False
-
+            self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
+        
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
         self.train_top_5 = Accuracy(top_k=5)
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
 
-        # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth). Currently hard-coded.
-        self.training_labels = 'clip'
-
-        # Sharpening of logits:
-        self.sharpening = 1e3
+        # Where to obtain the labels from during training (use CLIP as oracle or use ground-truth).
+        self.training_labels = 
 
     def criterion(self, input1, input2):
         """
         Args:
-            input1: Embeddings of the clean/noisy images from the teacher/student. Size [N, embedding_dim].
-            input2: Embeddings of the clean/noisy images from the teacher/student (the ones not used as input1). Size [N, embedding_dim].
-            reduction: how to scale the final loss
+            input1: Logit sketches of the clean images from the teacher. Size [N, sketch_size].
+            input2: Logit sketches of the noisy images from the student. Size [N, sketch_size].
         """
 
+        # MSE loss between Logit sketches.
         if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
+        
+        # L1 loss between Logit sketches.
         elif self.hparams.loss_type == 'l1':
             return F.l1_loss(input2, input1)
-        #Cross-entropy between clean and noisy logits
-        elif self.hparams.loss_type == 'cross':
-            target = input1
-            log_exp_frac = F.log_softmax(input2, dim=-1)
-            loss = - (1/input1.shape[0]) * torch.sum(log_exp_frac * target)
-            return loss
-
+            
+        # Contrastive losses between logit sketches.
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
             # Various schemes for the negative examples
@@ -237,7 +230,8 @@ class NoisyCLIP(LightningModule):
                 neg_term = torch.log(sim.sum(dim=1) - sim.diag())
             # Final loss is
             loss = -1 * (pos_term - neg_term).mean() # (summed and mean-reduced)
-
+            return loss
+            
         else:
             raise ValueError('Loss function not understood.')
 
@@ -250,85 +244,71 @@ class NoisyCLIP(LightningModule):
     def encode_noisy_image(self, image):
         """
         Return S(yi) where S() is the student network and yi is distorted images.
+        The result is an approximation of the sketch of the logits of the output.
         """
         y = self.noisy_visual_encoder(image.type(torch.float16))
         y = y / y.norm(dim=-1, keepdim=True)
-        #y = self.sharpening * self.extra_layer_1(y)
-        #y = F.softmax(y, dim=-1)
-        #return self.extra_layer_2(y)
-        return self.extra_layer_1(y)
+        return self.extra_layer(y)
 
-    def forward(self, image_features, text=None):
+    def forward(self, images):
         """
-        Given a set of noisy image embeddings, calculate the cosine similarity (scaled by temperature) of each image with each class text prompt.
-        Calculates the similarity in two ways: logits per image (size = [N, n_classes]), logits per text (size = [n_classes, N]).
-        This is mainly used for validation and classification.
-
+        Provide logits for input images. This function is used for validation and evaluation of model.
+        
         Args:
-            image_features: the noisy image embeddings S(yi) where S() is the student and yi = Distort(xi). Shape [N, embedding_dim]
+            images: the noisy input images to be classified.
         """
 
-        #load the pre-computed text features and load them on the correct device
-        text_features = self.baseclip.encode_text(clip.tokenize(self.text_list).to(self.device))
+        # 1) Retrieve the logit sketches for the images
+        label_sketch = self.encode_noisy_image(images)
+        
+        # 2) Solve a lasso reconstruction to retrieve the actual logits.
+        image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
+        for i in range(label_sketch.shape[0]):
+            image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
+       
+        # 3) apply softmax to force summation to 1.
+        out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
+        return out
+        
 
-        # normalized features
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
-        # cosine similarity as logits
-        logits_per_image = self.logit_scale * image_features.type(torch.float16) @ text_features.type(torch.float16).t()
-        logits_per_text = self.logit_scale * text_features.type(torch.float16) @ image_features.type(torch.float16).t()
-
-        return logits_per_image, logits_per_text
-
-    # Training methods - here we are concerned with contrastive loss (or MSE) between clean and noisy image embeddings.
+    # Training methods - here we train the student to approximate the logit sketches, as provided by the teacher.
     def training_step(self, train_batch, batch_idx):
         """
-        Takes a batch of clean and noisy images and returns their respective embeddings.
+        Takes a batch of clean and noisy images and returns their respective logit sketches.
 
         Returns:
-            embed_clean: T(xi) where T() is the teacher and xi are clean images. Shape [N, embed_dim]
-            embed_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, embed_dim]
+            sketch_clean: A softmax(G T(xi)) where T() is the teacher, xi are clean images, A is iid gaussian and G is the text embedding matrix. Shape [N, sketch_size]
+            sketch_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, sketch_size]
         """
         image_clean, image_noisy, labels = train_batch
         with torch.no_grad():
-            if self.training_labels == 'clip':
+            if self.hparams.training_labels == 'clip':
+                # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
                 self.baseclip.eval()
-                embed_clean = self.baseclip.encode_image(image_clean.type(torch.float16))
-                embed_clean = embed_clean / embed_clean.norm(dim=-1, keepdim=True)
-                embed_clean = self.sharpening * torch.matmul(embed_clean, self.text_features.to(image_clean.device))
-                embed_clean = F.softmax(embed_clean, dim=-1)
-                #temp = embed_clean
-                embed_clean = torch.matmul(embed_clean, self.random_on_clean.to(image_clean.device))
-            elif self.training_labels == 'truth':
-                embed_clean = torch.matmul(F.one_hot(labels, num_classes=100).float(), self.random_on_clean.to(image_clean.device))
+                sketch_clean = self.baseclip.encode_image(image_clean.type(torch.float16))
+                sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
+                sketch_clean = self.hparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(image_clean.device))
+                sketch_clean = F.softmax(sketch_clean, dim=-1)
+                sketch_clean = torch.matmul(sketch_clean, self.random_on_clean.to(image_clean.device))
+            elif self.hparams.training_labels == 'truth':
+                # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
+                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
         
-
-        #print(torch.sum(torch.topk(temp, 10, dim=-1)[0], dim=-1).mean()) 
-        embed_noisy = self.encode_noisy_image(image_noisy)
-        #print(torch.norm(image_clean-image_noisy, dim=(-2,-1)).mean())
-        #if batch_idx < 4:
-        #    with torch.no_grad():
-        #        tup = (embed_noisy.detach().cpu(), embed_clean_temp.detach().cpu(), self.random_on_clean.detach().cpu())
-        #        pickle.dump(tup, open('/tmp/results/{0:.7f}'.format(np.random.randn()),'wb'))
- 
-        return {'embed_clean': embed_clean, 'embed_noisy': embed_noisy}
+        sketch_noisy = self.encode_noisy_image(image_noisy)
+        
+        return {'sketch_clean': sketch_clean, 'sketch_noisy': sketch_noisy}
 
     def training_step_end(self, outputs):
         """
-        Given all the clean and noisy image embeddings form across GPUs from training_step, gather them onto a single GPU and calculate overall loss.
+        Given all the clean and noisy image sketches form across GPUs from training_step, gather them onto a single GPU and calculate overall loss.
         """
-        embed_clean_full = outputs['embed_clean']
-        embed_noisy_full = outputs['embed_noisy']
-        loss = self.criterion(embed_clean_full, embed_noisy_full)
-        #print(torch.min(torch.norm(embed_clean_full - embed_noisy_full, dim=-1)**2))
+        sketch_clean_full = outputs['sketch_clean']
+        sketch_noisy_full = outputs['sketch_noisy']
+        loss = self.criterion(sketch_clean_full, sketch_noisy_full)
         self.log('train_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-        self.log('mean_clean', embed_clean_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-        self.log('mean_noisy', embed_noisy_full.norm(dim=-1).mean(), prog_bar=True, logger=True, sync_dist=True, on_step=True, on_epoch=True)
-
         return loss
 
-    # Validation methods - here we are concerned with similarity between noisy image embeddings and classification text embeddings.
+    # Validation methods - here we retrieve the predicted labels from the sketches and evaluate.
     def validation_step(self, test_batch, batch_idx):
        """
        Grab the noisy image embeddings: S(yi), where S() is the student and yi = Distort(xi). Done on each GPU.
@@ -336,29 +316,19 @@ class NoisyCLIP(LightningModule):
        """
 
        images_noisy, labels = test_batch
-       label_sketch = self.encode_noisy_image(images_noisy)
-       #label_sketch = self.baseclip.encode_image(images_noisy)
-       #label_sketch = label_sketch / label_sketch.norm(dim=-1, keepdim=True)
-       #label_sketch = torch.matmul(label_sketch, self.text_features.to(label_sketch.device))
-       return {'label_sketch': label_sketch, 'labels': labels}
+       logits = self.forward(images_noisy)
+       return {'logits': logits, 'labels': labels}
 
     def validation_step_end(self, outputs):
        """
        Gather the noisy image features and their labels from each GPU.
        Then calculate their similarities, convert to probabilities, and calculate accuracy on each GPU.
        """
-       label_sketch = outputs['label_sketch']
+       logits_full = outputs['logits']
        labels_full = outputs['labels']
 
-       image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
-
-       for i in range(label_sketch.shape[0]):
-           image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
-       
-       image_probs = F.softmax(image_probs, dim=-1).to(labels_full.device)
-       #image_probs = F.softmax(label_sketch, dim=-1)
-       self.log('val_top_1_step', self.val_top_1(image_probs, labels_full), prog_bar=False, logger=False)
-       self.log('val_top_5_step', self.val_top_5(image_probs, labels_full), prog_bar=False, logger=False)
+       self.log('val_top_1_step', self.val_top_1(logits_full, labels_full), prog_bar=False, logger=False)
+       self.log('val_top_5_step', self.val_top_5(logits_full, labels_full), prog_bar=False, logger=False)
 
     def validation_epoch_end(self, outputs):
        """
@@ -424,7 +394,7 @@ def run_noisy_clip():
         version=args.experiment_name,
         name='NoisyCLIP_Logs'
     )
-    trainer = Trainer.from_argparse_args(args, logger=logger, num_sanity_val_steps=1)
+    trainer = Trainer.from_argparse_args(args, logger=logger)
     trainer.fit(model, datamodule=dataset)
 
 def grab_config():
