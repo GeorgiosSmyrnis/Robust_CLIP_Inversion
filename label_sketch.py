@@ -84,16 +84,13 @@ class ImageNetCLIPDataset(LightningDataModule):
         filename = self.hparams.dataset_dir + self.hparams.subset_file_name
 
         # Get the subset, as well as its labels as text.
-        text_labels = []
+        self.text_labels = []
         for i in range(100):
-            text_labels.append(train_data.idx_to_class[i])
+            self.text_labels.append(train_data.idx_to_class[i])
         # text_labels = list(train_data.idx_to_class.values())
 
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
-        # Save labels to be reused.
-        if self.hparams.save_mapping_and_text:
-            pickle.dump(text_labels, open(self.hparams.mapping_and_text_file, 'wb'))
 
     def train_dataloader(self):
         return DataLoader(self.train_contrastive, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=True)
@@ -106,7 +103,7 @@ class ImageNetCLIPDataset(LightningDataModule):
 
 
 class NoisyCLIP(LightningModule):
-    def __init__(self, args):
+    def __init__(self, args, text_labels):
         """
         This class trains a student to produce logit sketches which approximate those provided by a teacher model.
         These label skethes are then used to retrieve the predicted labels for the input images.
@@ -118,12 +115,6 @@ class NoisyCLIP(LightningModule):
         #(1) Load the correct dataset class names
         if self.hparams.dataset == "ImageNet100" or self.hparams.dataset == "Imagenet-100":
             self.N_val = 5000 # Default ImageNet validation set, only 100 classes.
-
-            #Retrieve the text labels for classes in order to do zero-shot classification.
-            if self.hparams.mapping_and_text_file is None:
-                raise ValueError('No file from which to read text labels was specified.')
-
-            text_labels = pickle.load(open(self.hparams.mapping_and_text_file, 'rb'))
             self.text_list = ['A photo of a '+label.strip().replace('_',' ') for label in text_labels]
         else:
             raise NotImplementedError('Handling of the dataset not implemented yet.')
@@ -204,25 +195,25 @@ class NoisyCLIP(LightningModule):
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
             # Various schemes for the negative examples
-            teacher_embeds = input1 / input1.norm(dim=1, keepdim=True)
-            student_embeds = input2 / input2.norm(dim=1, keepdim=True)
+            teacher_embeds = input1 / input1.norm(dim=-1, keepdim=True)
+            student_embeds = input2 / input2.norm(dim=-1, keepdim=True)
             # First compute positive examples by taking <S(x_i), T(x_i)>/T for all i
             pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hparams.loss_tau
             # Then generate the negative term by constructing various similarity matrices
             if self.hparams.loss_type == 'simclr_ss':
                 cov = torch.mm(student_embeds, student_embeds.t())
                 sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
+                neg_term = torch.log(sim.sum(dim=-1) - sim.diag())
             elif self.hparams.loss_type == 'simclr_st':
                 cov = torch.mm(student_embeds, teacher_embeds.t())
                 sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
-                neg_term = torch.log(sim.sum(dim=1)) # Not removing the diagonal here!
+                neg_term = torch.log(sim.sum(dim=-1)) # Not removing the diagonal here!
             else:
                 cat_embeds = torch.cat([student_embeds, teacher_embeds])
                 cov = torch.mm(student_embeds, cat_embeds.t())
                 sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, 2 * bsz]
                 # and take row-wise sums w/o diagonals and
-                neg_term = torch.log(sim.sum(dim=1) - sim.diag())
+                neg_term = torch.log(sim.sum(dim=-1) - sim.diag())
             # Final loss is
             loss = -1 * (pos_term - neg_term).mean() # (summed and mean-reduced)
             return loss
@@ -232,7 +223,8 @@ class NoisyCLIP(LightningModule):
 
     def configure_optimizers(self):
         optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hparams.lr)
-        num_steps = 126689//(self.hparams.batch_size * self.hparams.gpus) #divide N_train by number of distributed iters
+        num_samples = len(self.trainer.datamodule.train_dataloader())
+        num_steps = num_samples // (self.hparams.batch_size * self.hparams.gpus) #divide N_train by number of distributed iters
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=num_steps)
         return [optim], [sched]
 
@@ -393,7 +385,7 @@ def run_noisy_clip():
 
     dataset = ImageNetCLIPDataset(args)
     dataset.setup()
-    model = NoisyCLIP(args)
+    model = NoisyCLIP(args, dataset.text_labels)
 
     logger = TensorBoardLogger(
         save_dir=args.logdir,
