@@ -158,7 +158,8 @@ class NoisyCLIP(LightningModule):
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        self.random_on_clean = torch.randn(self.hparams.num_classes, self.hparams.sketch_size)
+        if not self.hparams.sketch_size == "None":
+            self.random_on_clean = torch.randn(self.hparams.num_classes, self.hparams.sketch_size)
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -169,9 +170,14 @@ class NoisyCLIP(LightningModule):
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
         
-        self.extra_layer = torch.nn.Linear(embed_size, self.hparams.sketch_size,bias=False)
-        with torch.no_grad():
-            self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
+        if self.hparams.sketch_size == "None":
+            self.extra_layer = torch.nn.Linear(embed_size, self.hparams.num_classes, bias=False)
+            with torch.no_grad():
+                self.extra_layer.weight.copy_(self.text_features.T)
+        else:
+            self.extra_layer = torch.nn.Linear(embed_size, self.hparams.sketch_size, bias=False)
+            with torch.no_grad():
+                self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
         
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -250,7 +256,11 @@ class NoisyCLIP(LightningModule):
         # 1) Retrieve the logit sketches for the images
         label_sketch = self.encode_noisy_image(images)
         
-        if self.hparams.reconstruction == 'lasso':
+        # If no sketch size is provided, then the student just outputs the logits.
+        if self.hparams.sketch_size == 'None':
+            out = label_sketch
+        
+        elif self.hparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
             image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
             for i in range(label_sketch.shape[0]):
@@ -284,7 +294,8 @@ class NoisyCLIP(LightningModule):
                 sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
                 sketch_clean = self.hparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(image_clean.device))
                 sketch_clean = F.softmax(sketch_clean, dim=-1)
-                sketch_clean = torch.matmul(sketch_clean, self.random_on_clean.to(image_clean.device))
+                if not self.hparams.sketch_size == 'None':
+                    sketch_clean = torch.matmul(sketch_clean, self.random_on_clean.to(image_clean.device))
             elif self.hparams.training_labels == 'truth':
                 # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
                 sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
