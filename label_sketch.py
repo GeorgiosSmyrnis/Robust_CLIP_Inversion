@@ -155,7 +155,6 @@ class NoisyCLIP(LightningModule):
 
 
         #(2) set up the teacher CLIP network - freeze it and don't use gradients!
-        self.logit_scale = self.hparams.logit_scale
         self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
@@ -170,7 +169,7 @@ class NoisyCLIP(LightningModule):
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
         
-        self.extra_layer_1 = torch.nn.Linear(embed_size, self.hparams.sketch_size,bias=False)
+        self.extra_layer = torch.nn.Linear(embed_size, self.hparams.sketch_size,bias=False)
         with torch.no_grad():
             self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
         
@@ -199,8 +198,8 @@ class NoisyCLIP(LightningModule):
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
             # Various schemes for the negative examples
-            teacher_embeds = input1
-            student_embeds = input2
+            teacher_embeds = input1 / input1.norm(dim=1, keepdim=True)
+            student_embeds = input2 / input2.norm(dim=1, keepdim=True)
             # First compute positive examples by taking <S(x_i), T(x_i)>/T for all i
             pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hparams.loss_tau
             # Then generate the negative term by constructing various similarity matrices
@@ -262,7 +261,7 @@ class NoisyCLIP(LightningModule):
             
         elif self.hparams.reconstruction == 'adjoint':
             # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
-            out = torch.matmul(label_sketch, self.random_on_clean.T)
+            out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.T.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
             
         return out
         
