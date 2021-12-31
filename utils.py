@@ -20,7 +20,7 @@ def solve_lasso_on_simplex(X, y, alpha=0.1):
     objective = cp.Minimize(cp.sum_squares(X @ w - y) + alpha*cp.norm1(w))
     constraints = [w >= 0, cp.sum(w) == 1]
     prob = cp.Problem(objective, constraints)
-    prob.solve()
+    prob.solve(solver='ECOS')
     return w.value
 
 def convnoise(x, epoch=None):

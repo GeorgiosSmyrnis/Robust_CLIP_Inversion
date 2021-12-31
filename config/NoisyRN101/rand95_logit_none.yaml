@@ -1,6 +1,6 @@
 seed: 1234
 
-experiment_name: "rand90_logit"
+experiment_name: "rand95_logit_none"
 
 num_nodes: 1
 gpus: 4
@@ -14,7 +14,7 @@ training_labels: "clip"
 
 distortion: "randommask"
 fixed_mask: False
-percent_missing: 0.9
+percent_missing: 0.95
 sketch_size: "None"
 
 lr: 0.00005
@@ -28,8 +28,6 @@ subset_file_name: "imagenet100.txt"
 
 dataset_dir: "/tmp/imagenet100"
 logdir: "/tmp"
-mapping_and_text_file: "./mapping_text_labels_imagenet100.pkl"
-save_mapping_and_text: True
 
 batch_size: 256
 

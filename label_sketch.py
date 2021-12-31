@@ -223,8 +223,7 @@ class NoisyCLIP(LightningModule):
 
     def configure_optimizers(self):
         optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hparams.lr)
-        num_samples = len(self.trainer.datamodule.train_dataloader())
-        num_steps = num_samples // (self.hparams.batch_size * self.hparams.gpus) #divide N_train by number of distributed iters
+        num_steps = 126689 // (self.hparams.batch_size * self.hparams.gpus) #divide N_train by number of distributed iters
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=num_steps)
         return [optim], [sched]
 
@@ -250,7 +249,7 @@ class NoisyCLIP(LightningModule):
         
         # If no sketch size is provided, then the student just outputs the logits.
         if self.hparams.sketch_size == 'None':
-            out = label_sketch
+            out = F.softmax(label_sketch, dim=-1)
         
         elif self.hparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
