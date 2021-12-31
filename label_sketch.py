@@ -99,15 +99,19 @@ class ImageNetCLIPDataset(LightningDataModule):
         else:
             raise NotImplementedError('Dataset chosen not implemented.')
 
-        train_idx, val_idx = train_test_split(np.arange(len(targets)), test_size=50000, stratify=targets)
+        train_idx, val_idx = train_test_split(np.arange(len(train_data_orig.targets)), test_size=50000, stratify=train_data_orig.targets)
         train_data = torch.utils.data.Subset(train_data_orig, train_idx)
         self.val_data = torch.utils.data.Subset(train_data_orig, val_idx)
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
         # Get the subset, as well as its labels as text.
+        idx_to_class = {idx: cls
+                        for idx, clss in enumerate(train_data_orig.classes)
+                        for i, cls in enumerate(clss) if i == 0}
+
         self.text_labels = []
-        for i in range(100):
-            self.text_labels.append(train_data.idx_to_class[i])
+        for i in range(self.hparams.num_classes):
+            self.text_labels.append(idx_to_class[i])
         # text_labels = list(train_data.idx_to_class.values())
 
 
