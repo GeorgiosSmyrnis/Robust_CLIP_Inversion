@@ -10,6 +10,7 @@ import pickle
 
 from utils import *
 
+from torchvision.datasets import ImageNet
 from pytorch_lightning import Trainer, LightningModule, LightningDataModule, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.metrics import Accuracy
@@ -70,18 +71,31 @@ class ImageNetCLIPDataset(LightningDataModule):
                 self.val_set_transform = ImageNetDistortVal(self.hparams)
 
     def setup(self, stage=None):
-        train_data = ImageNet100(
-        	root=self.hparams.dataset_dir,
-            split="train",
-            transform=None
-        )
-        self.val_data = ImageNet100(
-            root=self.hparams.dataset_dir,
-            split="val",
-            transform=self.val_set_transform
-        )
 
-        filename = self.hparams.dataset_dir + self.hparams.subset_file_name
+        if self.hparams.dataset.lower() == 'imagenet100' or self.hparams.dataset.lower() == 'imagenet-100':
+            train_data = ImageNet100(
+            	root=self.hparams.dataset_dir,
+                split="train",
+                transform=None
+            )
+            self.val_data = ImageNet100(
+                root=self.hparams.dataset_dir,
+                split="val",
+                transform=self.val_set_transform
+            )
+        elif self.hparams.dataset.lower() == 'imagenet':
+            train_data = ImageNet(
+            	root=self.hparams.dataset_dir,
+                split="train",
+                transform=None
+            )
+            self.val_data = ImageNet(
+                root=self.hparams.dataset_dir,
+                split="val",
+                transform=self.val_set_transform
+            )
+        else:
+            raise NotImplementedError('Dataset chosen not implemented.')
 
         # Get the subset, as well as its labels as text.
         self.text_labels = []
@@ -113,31 +127,10 @@ class NoisyCLIP(LightningModule):
         self.world_size = self.hparams.num_nodes * self.hparams.gpus
 
         #(1) Load the correct dataset class names
-        if self.hparams.dataset == "ImageNet100" or self.hparams.dataset == "Imagenet-100":
-            self.N_val = 5000 # Default ImageNet validation set, only 100 classes.
+        if self.hparams.dataset.lower() == "imagenet100" or self.hparams.dataset.lower() == "imagenet-100" or self.hparams.dataset.lower() == 'imagenet':
             self.text_list = ['A photo of a '+label.strip().replace('_',' ') for label in text_labels]
         else:
             raise NotImplementedError('Handling of the dataset not implemented yet.')
-
-        #Set up the dataset
-        #Here, we use a 100-class subset of ImageNet
-        if self.hparams.dataset != "ImageNet100" and self.hparams.dataset != "Imagenet-100":
-            raise ValueError("Unsupported dataset selected.")
-        elif not hasattr(self.hparams, 'increasing') or not self.hparams.increasing:
-            if self.hparams.distortion == "None":
-                self.train_set_transform = ImageNetBaseTrainContrastive(self.hparams)
-                self.val_set_transform = ImageNetBaseTransformVal(self.hparams)
-            elif self.hparams.distortion == "multi":
-                self.train_set_transform = ImageNetDistortTrainMultiContrastive(self.hparams)
-                self.val_set_transform = ImageNetDistortValMulti(self.hparams)
-            else:
-                #If we are using the ImageNet dataset, then set up the train and val sets to use the same mask if needed!
-                self.train_set_transform = ImageNetDistortTrainContrastive(self.hparams)
-
-                if self.hparams.fixed_mask:
-                    self.val_set_transform = ImageNetDistortVal(self.hparams, fixed_distortion=self.train_set_transform.distortion)
-                else:
-                    self.val_set_transform = ImageNetDistortVal(self.hparams)
 
         if self.hparams.baseclip_type.startswith('RN'):
             embed_size = 512
@@ -160,7 +153,7 @@ class NoisyCLIP(LightningModule):
         #(3) set up the student CLIP network - unfreeze it and use gradients!
         self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
-        
+
         if self.hparams.sketch_size == "None":
             self.extra_layer = torch.nn.Linear(embed_size, self.hparams.num_classes, bias=False)
             with torch.no_grad():
@@ -169,7 +162,7 @@ class NoisyCLIP(LightningModule):
             self.extra_layer = torch.nn.Linear(embed_size, self.hparams.sketch_size, bias=False)
             with torch.no_grad():
                 self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
-        
+
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
         self.train_top_5 = Accuracy(top_k=5)
@@ -186,11 +179,11 @@ class NoisyCLIP(LightningModule):
         # MSE loss between Logit sketches.
         if self.hparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
-        
+
         # L1 loss between Logit sketches.
         elif self.hparams.loss_type == 'l1':
             return F.l1_loss(input2, input1)
-            
+
         # Contrastive losses between logit sketches.
         elif self.hparams.loss_type.startswith('simclr_'):
             assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
@@ -217,7 +210,7 @@ class NoisyCLIP(LightningModule):
             # Final loss is
             loss = -1 * (pos_term - neg_term).mean() # (summed and mean-reduced)
             return loss
-            
+
         else:
             raise ValueError('Loss function not understood.')
 
@@ -239,33 +232,33 @@ class NoisyCLIP(LightningModule):
     def forward(self, images):
         """
         Provide logits for input images. This function is used for validation and evaluation of model.
-        
+
         Args:
             images: the noisy input images to be classified.
         """
 
         # 1) Retrieve the logit sketches for the images
         label_sketch = self.encode_noisy_image(images)
-        
+
         # If no sketch size is provided, then the student just outputs the logits.
         if self.hparams.sketch_size == 'None':
             out = F.softmax(label_sketch, dim=-1)
-        
+
         elif self.hparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
             image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
             for i in range(label_sketch.shape[0]):
                 image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
-           
+
             # 3) apply softmax to force summation to 1.
             out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
-            
+
         elif self.hparams.reconstruction == 'adjoint':
             # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
             out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.T.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
-            
+
         return out
-        
+
 
     # Training methods - here we train the student to approximate the logit sketches, as provided by the teacher.
     def training_step(self, train_batch, batch_idx):
@@ -290,9 +283,9 @@ class NoisyCLIP(LightningModule):
             elif self.hparams.training_labels == 'truth':
                 # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
                 sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
-        
+
         sketch_noisy = self.encode_noisy_image(image_noisy)
-        
+
         return {'sketch_clean': sketch_clean, 'sketch_noisy': sketch_noisy}
 
     def training_step_end(self, outputs):
@@ -336,46 +329,6 @@ class NoisyCLIP(LightningModule):
        self.val_top_1.reset()
        self.val_top_5.reset()
 
-    # Default dataloaders - can be overwritten by datamodule.
-    def train_dataloader(self):
-        if hasattr(self.hparams, 'increasing') and self.hparams.increasing:
-            datatf = ImageNetDistortTrainContrastive(self.hparams, epoch=self.current_epoch)
-        else:
-            datatf = self.train_set_transform
-
-        train_dataset = ImageNet100(
-            root=self.hparams.dataset_dir,
-            split = 'train',
-            transform = None
-        )
-        train_contrastive = ContrastiveUnsupervisedDataset(train_dataset, transform_contrastive=datatf, return_label=True)
-
-        train_dataloader = DataLoader(train_contrastive, batch_size=self.hparams.batch_size, num_workers=self.hparams.workers,\
-                                        pin_memory=True, shuffle=True)
-
-        return train_dataloader
-
-    def val_dataloader(self):
-       if hasattr(self.hparams, 'increasing') and self.hparams.increasing:
-           datatf = ImageNetDistortVal(self.hparams, epoch=self.current_epoch)
-       else:
-           datatf = self.val_set_transform
-
-       val_dataset = ImageNet100(
-           root=self.hparams.dataset_dir,
-           split = 'val',
-           transform = datatf
-       )
-       self.N_val = len(val_dataset)
-
-       val_dataloader = DataLoader(val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.workers,\
-                                       pin_memory=True, shuffle=False)
-
-       return val_dataloader
-
-    def test_dataloader(self):
-       return self.val_dataloader()
-
 
 def run_noisy_clip():
     args = grab_config()
@@ -391,8 +344,13 @@ def run_noisy_clip():
         version=args.experiment_name,
         name='NoisyCLIP_Logs'
     )
-    trainer = Trainer.from_argparse_args(args, logger=logger)
+    if args.dataset.lower() == 'imagenet100' or args.dataset.lower() == 'imagenet-100':
+        trainer = Trainer.from_argparse_args(args, logger=logger)
+    elif args.dataset.lower() == 'imagenet':
+        # In case of ImageNet, use fewer data per epoch (for speed)
+        trainer = Trainer.from_argparse_args(args, logger=logger, limit_train_batches=0.1, reload_dataloaders_every_epoch=True)
     trainer.fit(model, datamodule=dataset)
+
 
 def grab_config():
     parser = argparse.ArgumentParser(description="NoisyCLIP")
