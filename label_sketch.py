@@ -14,10 +14,10 @@ from torchvision.datasets import ImageNet
 from pytorch_lightning import Trainer, LightningModule, LightningDataModule, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.metrics import Accuracy
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torch.utils.data  import DataLoader
 
-from sklearn.linear_model import Lasso
+from sklearn.model_selection import train_test_split
 
 class ContrastiveUnsupervisedDataset(torch.utils.data.Dataset):
     """
@@ -73,23 +73,25 @@ class ImageNetCLIPDataset(LightningDataModule):
     def setup(self, stage=None):
 
         if self.hparams.dataset.lower() == 'imagenet100' or self.hparams.dataset.lower() == 'imagenet-100':
-            train_data = ImageNet100(
+            train_data_orig = ImageNet100(
             	root=self.hparams.dataset_dir,
                 split="train",
                 transform=None
             )
-            self.val_data = ImageNet100(
+            # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
+            self.test_data = ImageNet100(
                 root=self.hparams.dataset_dir,
                 split="val",
                 transform=self.val_set_transform
             )
         elif self.hparams.dataset.lower() == 'imagenet':
-            train_data = ImageNet(
+            train_data_orig = ImageNet(
             	root=self.hparams.dataset_dir,
                 split="train",
                 transform=None
             )
-            self.val_data = ImageNet(
+            # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
+            self.test_data = ImageNet(
                 root=self.hparams.dataset_dir,
                 split="val",
                 transform=self.val_set_transform
@@ -97,13 +99,16 @@ class ImageNetCLIPDataset(LightningDataModule):
         else:
             raise NotImplementedError('Dataset chosen not implemented.')
 
+        train_idx, val_idx = train_test_split(np.arange(len(targets)), test_size=50000, stratify=targets)
+        train_data = torch.utils.data.Subset(train_data_orig, train_idx)
+        self.val_data = torch.utils.data.Subset(train_data_orig, val_idx)
+        self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
+
         # Get the subset, as well as its labels as text.
         self.text_labels = []
         for i in range(100):
             self.text_labels.append(train_data.idx_to_class[i])
         # text_labels = list(train_data.idx_to_class.values())
-
-        self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
 
     def train_dataloader(self):
@@ -113,7 +118,7 @@ class ImageNetCLIPDataset(LightningDataModule):
         return DataLoader(self.val_data, batch_size=2*self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False) # Only used for evaluation.
 
     def test_dataloader(self):
-        return self.val_dataloader() # Same data to be used for testing, for our purposes.
+        return DataLoader(self.test_data, batch_size=2*self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False)
 
 
 class NoisyCLIP(LightningModule):
@@ -168,6 +173,8 @@ class NoisyCLIP(LightningModule):
         self.train_top_5 = Accuracy(top_k=5)
         self.val_top_1 = Accuracy(top_k=1)
         self.val_top_5 = Accuracy(top_k=5)
+        self.test_top_1 = Accuracy(top_k=1)
+        self.test_top_5 = Accuracy(top_k=5)
 
     def criterion(self, input1, input2):
         """
@@ -300,34 +307,54 @@ class NoisyCLIP(LightningModule):
 
     # Validation methods - here we retrieve the predicted labels from the sketches and evaluate.
     def validation_step(self, test_batch, batch_idx):
-       """
-       Grab the noisy image embeddings: S(yi), where S() is the student and yi = Distort(xi). Done on each GPU.
-       Return these to be evaluated in validation step end.
-       """
+        """
+        Grab the noisy image embeddings: S(yi), where S() is the student and yi = Distort(xi). Done on each GPU.
+        Return these to be evaluated in validation step end.
+        """
 
-       images_noisy, labels = test_batch
-       logits = self.forward(images_noisy)
-       return {'logits': logits, 'labels': labels}
+        images_noisy, labels = test_batch
+        logits = self.forward(images_noisy)
+        return {'logits': logits, 'labels': labels}
 
     def validation_step_end(self, outputs):
-       """
-       Gather the noisy image features and their labels from each GPU.
-       Then calculate their similarities, convert to probabilities, and calculate accuracy on each GPU.
-       """
-       logits_full = outputs['logits']
-       labels_full = outputs['labels']
+        """
+        Gather the noisy image features and their labels from each GPU.
+        Then calculate their similarities, convert to probabilities, and calculate accuracy on each GPU.
+        """
+        logits_full = outputs['logits']
+        labels_full = outputs['labels']
 
-       self.log('val_top_1_step', self.val_top_1(logits_full, labels_full), prog_bar=False, logger=False)
-       self.log('val_top_5_step', self.val_top_5(logits_full, labels_full), prog_bar=False, logger=False)
+        self.log('val_top_1_step', self.val_top_1(logits_full, labels_full), prog_bar=False, logger=False)
+        self.log('val_top_5_step', self.val_top_5(logits_full, labels_full), prog_bar=False, logger=False)
 
     def validation_epoch_end(self, outputs):
-       """
-       Gather the zero-shot validation accuracies from across GPUs and reduce.
-       """
-       self.log('val_top_1', self.val_top_1.compute(), prog_bar=True, logger=True)
-       self.log('val_top_5', self.val_top_5.compute(), prog_bar=True, logger=True)
-       self.val_top_1.reset()
-       self.val_top_5.reset()
+        """
+        Gather the zero-shot validation accuracies from across GPUs and reduce.
+        """
+        self.log('val_top_1', self.val_top_1.compute(), prog_bar=True, logger=True)
+        self.log('val_top_5', self.val_top_5.compute(), prog_bar=True, logger=True)
+        self.val_top_1.reset()
+        self.val_top_5.reset()
+
+    # Test methods - same as validation, just with different metric aggregator
+    def test_step(self, test_batch, batch_idx):
+        images_noisy, labels = test_batch
+        logits = self.forward(images_noisy)
+        return {'logits': logits, 'labels': labels}
+
+    def test_step_end(self, outputs):
+        logits_full = outputs['logits']
+        labels_full = outputs['labels']
+
+        self.log('test_top_1_step', self.test_top_1(logits_full, labels_full), prog_bar=False, logger=False)
+        self.log('test_top_5_step', self.test_top_5(logits_full, labels_full), prog_bar=False, logger=False)
+
+    def test_epoch_end(self, outputs):
+        self.log('test_top_1', self.test_top_1.compute(), prog_bar=True, logger=True)
+        self.log('test_top_5', self.test_top_5.compute(), prog_bar=True, logger=True)
+        self.test_top_1.reset()
+        self.test_top_5.reset()
+
 
 
 def run_noisy_clip():
@@ -344,12 +371,29 @@ def run_noisy_clip():
         version=args.experiment_name,
         name='NoisyCLIP_Logs'
     )
+
+    callbacks = [
+        ModelCheckpoint(monitor='val_top_1'),
+        EarlyStopping(monitor='val_top_1')
+    ]
+
     if args.dataset.lower() == 'imagenet100' or args.dataset.lower() == 'imagenet-100':
-        trainer = Trainer.from_argparse_args(args, logger=logger)
+        trainer = Trainer.from_argparse_args(
+            args,
+            logger=logger,
+            callbacks=callbacks
+        )
     elif args.dataset.lower() == 'imagenet':
         # In case of ImageNet, use fewer data per epoch (for speed)
-        trainer = Trainer.from_argparse_args(args, logger=logger, limit_train_batches=0.1, reload_dataloaders_every_epoch=True)
+        trainer = Trainer.from_argparse_args(
+            args,
+            logger=logger,
+            limit_train_batches=0.1,
+            reload_dataloaders_every_epoch=True,
+            callbacks=callbacks
+        )
     trainer.fit(model, datamodule=dataset)
+    trainer.test(model, datamodule=dataset)
 
 
 def grab_config():
