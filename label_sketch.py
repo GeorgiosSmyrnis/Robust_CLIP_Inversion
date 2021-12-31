@@ -73,11 +73,19 @@ class ImageNetCLIPDataset(LightningDataModule):
     def setup(self, stage=None):
 
         if self.hparams.dataset.lower() == 'imagenet100' or self.hparams.dataset.lower() == 'imagenet-100':
-            train_data_orig = ImageNet100(
+            train_data_full = ImageNet100(
             	root=self.hparams.dataset_dir,
                 split="train",
                 transform=None
             )
+
+            # For validation, we will use part of the training set.
+            val_data_full = ImageNet100(
+            	root=self.hparams.dataset_dir,
+                split="train",
+                transform=self.val_set_transform
+            )
+
             # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
             self.test_data = ImageNet100(
                 root=self.hparams.dataset_dir,
@@ -90,6 +98,14 @@ class ImageNetCLIPDataset(LightningDataModule):
                 split="train",
                 transform=None
             )
+
+            # For validation, we will use part of the training set.
+            val_data_full = ImageNet(
+            	root=self.hparams.dataset_dir,
+                split="train",
+                transform=self.val_set_transform
+            )
+
             # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
             self.test_data = ImageNet(
                 root=self.hparams.dataset_dir,
@@ -100,8 +116,8 @@ class ImageNetCLIPDataset(LightningDataModule):
             raise NotImplementedError('Dataset chosen not implemented.')
 
         train_idx, val_idx = train_test_split(np.arange(len(train_data_orig.targets)), test_size=50000, stratify=train_data_orig.targets)
-        train_data = torch.utils.data.Subset(train_data_orig, train_idx)
-        self.val_data = torch.utils.data.Subset(train_data_orig, val_idx)
+        train_data = torch.utils.data.Subset(train_data_full, train_idx)
+        self.val_data = torch.utils.data.Subset(val_data_full, val_idx)
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
         # Get the subset, as well as its labels as text.
