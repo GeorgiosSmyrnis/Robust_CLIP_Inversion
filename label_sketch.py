@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import os
 import argparse
 import numpy as np
 import torch
@@ -93,7 +94,7 @@ class ImageNetCLIPDataset(LightningDataModule):
                 transform=self.val_set_transform
             )
         elif self.hparams.dataset.lower() == 'imagenet':
-            train_data_orig = ImageNet(
+            train_data_full = ImageNet(
             	root=self.hparams.dataset_dir,
                 split="train",
                 transform=None
@@ -115,14 +116,14 @@ class ImageNetCLIPDataset(LightningDataModule):
         else:
             raise NotImplementedError('Dataset chosen not implemented.')
 
-        train_idx, val_idx = train_test_split(np.arange(len(train_data_orig.targets)), test_size=50000, stratify=train_data_orig.targets)
+        train_idx, val_idx = train_test_split(np.arange(len(train_data_full.targets)), test_size=5000, stratify=train_data_full.targets, random_state=self.hparams.seed)
         train_data = torch.utils.data.Subset(train_data_full, train_idx)
         self.val_data = torch.utils.data.Subset(val_data_full, val_idx)
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
 
         # Get the subset, as well as its labels as text.
         idx_to_class = {idx: cls
-                        for idx, clss in enumerate(train_data_orig.classes)
+                        for idx, clss in enumerate(train_data_full.classes)
                         for i, cls in enumerate(clss) if i == 0}
 
         self.text_labels = []
@@ -135,10 +136,10 @@ class ImageNetCLIPDataset(LightningDataModule):
         return DataLoader(self.train_contrastive, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_data, batch_size=2*self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False) # Only used for evaluation.
+        return DataLoader(self.val_data, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False) # Only used for evaluation.
 
     def test_dataloader(self):
-        return DataLoader(self.test_data, batch_size=2*self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False)
+        return DataLoader(self.test_data, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False)
 
 
 class NoisyCLIP(LightningModule):
@@ -393,8 +394,8 @@ def run_noisy_clip():
     )
 
     callbacks = [
-        ModelCheckpoint(monitor='val_top_1'),
-        EarlyStopping(monitor='val_top_1')
+        ModelCheckpoint(monitor='val_top_1', mode='max'),
+        EarlyStopping(monitor='val_top_1', mode='max', patience=5)
     ]
 
     if args.dataset.lower() == 'imagenet100' or args.dataset.lower() == 'imagenet-100':
@@ -408,11 +409,14 @@ def run_noisy_clip():
         trainer = Trainer.from_argparse_args(
             args,
             logger=logger,
-            limit_train_batches=0.1,
-            reload_dataloaders_every_epoch=True,
-            callbacks=callbacks
+            num_sanity_val_steps=0,
+            limit_val_batches=0
         )
     trainer.fit(model, datamodule=dataset)
+    
+    directory = os.path.join(args.logdir, 'NoisyCLIP_Logs', args.experiment_name, 'checkpoints')
+    path = os.path.join(directory, os.listdir(directory)[0])
+    model = NoisyCLIP.load_from_checkpoint(path, text_labels=dataset.text_labels)
     trainer.test(model, datamodule=dataset)
 
 

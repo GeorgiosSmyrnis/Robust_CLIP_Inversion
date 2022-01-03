@@ -1,6 +1,6 @@
 seed: 1234
 
-experiment_name: "rand95_logit_none"
+experiment_name: "rand95_logit_500_full"
 
 num_nodes: 1
 gpus: 4
@@ -14,19 +14,18 @@ training_labels: "clip"
 
 distortion: "randommask"
 fixed_mask: False
-percent_missing: 0.95
-sketch_size: "None"
+percent_missing: 0.9
+sketch_size: 500
 
 lr: 0.0001
 weight_decay: 0.0001
 sharpening: 1000
 loss_tau: 0.1
 
-dataset: "Imagenet-100"
-num_classes: 100
-subset_file_name: "imagenet100.txt"
+dataset: "Imagenet"
+num_classes: 1000
 
-dataset_dir: "/tmp/imagenet100"
+dataset_dir: "/tmp/imagenet_subsampled"
 logdir: "/tmp"
 
 batch_size: 256
