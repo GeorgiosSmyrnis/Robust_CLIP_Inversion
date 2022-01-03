@@ -6,10 +6,10 @@ num_nodes: 1
 gpus: 4
 
 encoder: "clip"
-baseclip_type: "RN101"
+baseclip_type: "RN50"
 device: "cpu"
 loss_type: "mse"
-reconstruction: "lasso"
+reconstruction: "adjoint"
 training_labels: "clip"
 
 distortion: "randommask"
@@ -25,14 +25,14 @@ loss_tau: 0.1
 dataset: "Imagenet"
 num_classes: 1000
 
-dataset_dir: "/scratch1/08002/gsmyrnis"
+dataset_dir: "/tmp/imagenet_subsampled"
 logdir: "/tmp"
 
-batch_size: 256
+batch_size: 80
 
 workers: 12
 
-distributed_backend: "dp"
+distributed_backend: "ddp"
 
 #training
 max_epochs: 2
