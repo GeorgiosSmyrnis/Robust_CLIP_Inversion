@@ -158,8 +158,10 @@ class NoisyCLIP(LightningModule):
         else:
             raise NotImplementedError('Handling of the dataset not implemented yet.')
 
-        if self.hyparams.baseclip_type.startswith('RN'):
+        if self.hyparams.baseclip_type == 'RN101':
             embed_size = 512
+        elif self.hyparams.baseclip_type == 'RN50':
+            embed_size = 1024
         else:
             raise NotImplementedError('Unknown embedding size.')
 
@@ -190,7 +192,7 @@ class NoisyCLIP(LightningModule):
         else:
             self.extra_layer = torch.nn.Linear(embed_size, self.hyparams.sketch_size, bias=False)
             with torch.no_grad():
-                self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
+                self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean.weight.T).T)
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -277,16 +279,16 @@ class NoisyCLIP(LightningModule):
 
         elif self.hyparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
-            image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
+            image_probs = torch.zeros(label_sketch.shape[0], self.hyparams.num_classes)
             for i in range(label_sketch.shape[0]):
-                image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
+                image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.weight.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
 
             # 3) apply softmax to force summation to 1.
             out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
 
         elif self.hyparams.reconstruction == 'adjoint':
             # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
-            out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.T.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
+            out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.weight), dim=-1) # Note that this is not accurate beyond top-1!
 
         return out
 
