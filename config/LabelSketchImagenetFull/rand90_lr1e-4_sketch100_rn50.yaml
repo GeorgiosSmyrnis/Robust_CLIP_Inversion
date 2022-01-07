@@ -1,12 +1,12 @@
 seed: 1234
 
-experiment_name: "rand90_logit_100_full_long"
+experiment_name: "rand90_logit_100_full_rn50"
 
 num_nodes: 1
 gpus: 4
 
 encoder: "clip"
-baseclip_type: "RN101"
+baseclip_type: "RN50"
 device: "cpu"
 loss_type: "mse"
 reconstruction: "adjoint"
@@ -17,7 +17,7 @@ fixed_mask: False
 percent_missing: 0.90
 sketch_size: 100
 
-lr: 0.0001
+lr: 0.001
 weight_decay: 0.0001
 sharpening: 1000
 loss_tau: 0.1
@@ -28,15 +28,15 @@ num_classes: 1000
 dataset_dir: "/tmp/imagenet_subsampled"
 logdir: "/tmp"
 
-batch_size: 200
+batch_size: 80
 
 workers: 12
 
-distributed_backend: "dp"
+distributed_backend: "ddp"
 
 #training
-max_epochs: 90
-log_save_interval: 90 #set this to be equal to num_epochs if row_log_interval is 1
+max_epochs: 50
+log_save_interval: 50 #set this to be equal to num_epochs if row_log_interval is 1
 row_log_interval: 1
 sync_bn: True
 

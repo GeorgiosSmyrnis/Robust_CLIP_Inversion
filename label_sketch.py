@@ -14,7 +14,7 @@ from utils import *
 from torchvision.datasets import ImageNet
 from pytorch_lightning import Trainer, LightningModule, LightningDataModule, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.metrics import Accuracy
+from torchmetrics import Accuracy
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torch.utils.data  import DataLoader
 
@@ -50,73 +50,73 @@ class ImageNetCLIPDataset(LightningDataModule):
     def __init__(self, args):
         super(ImageNetCLIPDataset, self).__init__()
 
-        self.hparams = args
+        self.hyparams = args
 
-        self.dataset_dir = self.hparams.dataset_dir
-        self.batch_size = self.hparams.batch_size
+        self.dataset_dir = self.hyparams.dataset_dir
+        self.batch_size = self.hyparams.batch_size
 
-        if self.hparams.distortion == "None":
-            self.train_set_transform = ImageNetBaseTrainContrastive(self.hparams)
-            self.val_set_transform = ImageNetBaseTransformVal(self.hparams)
-        elif self.hparams.distortion == 'multi':
+        if self.hyparams.distortion == "None":
+            self.train_set_transform = ImageNetBaseTrainContrastive(self.hyparams)
+            self.val_set_transform = ImageNetBaseTransformVal(self.hyparams)
+        elif self.hyparams.distortion == 'multi':
             #set up the training transform and if we want a fixed mask, transfer the same mask to the validation transform
-            self.train_set_transform = ImageNetDistortTrainMultiContrastive(self.hparams)
-            self.val_set_transform = ImageNetDistortValMulti(self.hparams)
+            self.train_set_transform = ImageNetDistortTrainMultiContrastive(self.hyparams)
+            self.val_set_transform = ImageNetDistortValMulti(self.hyparams)
         else:
             #set up the training transform and if we want a fixed mask, transfer the same mask to the validation transform
-            self.train_set_transform = ImageNetDistortTrainContrastive(self.hparams)
+            self.train_set_transform = ImageNetDistortTrainContrastive(self.hyparams)
 
-            if self.hparams.fixed_mask:
-                self.val_set_transform = ImageNetDistortVal(self.hparams, fixed_distortion=self.train_set_transform.distortion)
+            if self.hyparams.fixed_mask:
+                self.val_set_transform = ImageNetDistortVal(self.hyparams, fixed_distortion=self.train_set_transform.distortion)
             else:
-                self.val_set_transform = ImageNetDistortVal(self.hparams)
+                self.val_set_transform = ImageNetDistortVal(self.hyparams)
 
     def setup(self, stage=None):
 
-        if self.hparams.dataset.lower() == 'imagenet100' or self.hparams.dataset.lower() == 'imagenet-100':
+        if self.hyparams.dataset.lower() == 'imagenet100' or self.hyparams.dataset.lower() == 'imagenet-100':
             train_data_full = ImageNet100(
-            	root=self.hparams.dataset_dir,
+            	root=self.hyparams.dataset_dir,
                 split="train",
                 transform=None
             )
 
             # For validation, we will use part of the training set.
             val_data_full = ImageNet100(
-            	root=self.hparams.dataset_dir,
+            	root=self.hyparams.dataset_dir,
                 split="train",
                 transform=self.val_set_transform
             )
 
             # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
             self.test_data = ImageNet100(
-                root=self.hparams.dataset_dir,
+                root=self.hyparams.dataset_dir,
                 split="val",
                 transform=self.val_set_transform
             )
-        elif self.hparams.dataset.lower() == 'imagenet':
+        elif self.hyparams.dataset.lower() == 'imagenet':
             train_data_full = ImageNet(
-            	root=self.hparams.dataset_dir,
+            	root=self.hyparams.dataset_dir,
                 split="train",
                 transform=None
             )
 
             # For validation, we will use part of the training set.
             val_data_full = ImageNet(
-            	root=self.hparams.dataset_dir,
+            	root=self.hyparams.dataset_dir,
                 split="train",
                 transform=self.val_set_transform
             )
 
             # Note that we are using the val split for testing - this is due to the actual imagenet test not having public labels.
             self.test_data = ImageNet(
-                root=self.hparams.dataset_dir,
+                root=self.hyparams.dataset_dir,
                 split="val",
                 transform=self.val_set_transform
             )
         else:
             raise NotImplementedError('Dataset chosen not implemented.')
 
-        train_idx, val_idx = train_test_split(np.arange(len(train_data_full.targets)), test_size=5000, stratify=train_data_full.targets, random_state=self.hparams.seed)
+        train_idx, val_idx = train_test_split(np.arange(len(train_data_full.targets)), test_size=5000, stratify=train_data_full.targets, random_state=self.hyparams.seed)
         train_data = torch.utils.data.Subset(train_data_full, train_idx)
         self.val_data = torch.utils.data.Subset(val_data_full, val_idx)
         self.train_contrastive = ContrastiveUnsupervisedDataset(train_data, transform_contrastive=self.train_set_transform, return_label=True)
@@ -127,19 +127,19 @@ class ImageNetCLIPDataset(LightningDataModule):
                         for i, cls in enumerate(clss) if i == 0}
 
         self.text_labels = []
-        for i in range(self.hparams.num_classes):
+        for i in range(self.hyparams.num_classes):
             self.text_labels.append(idx_to_class[i])
         # text_labels = list(train_data.idx_to_class.values())
 
 
     def train_dataloader(self):
-        return DataLoader(self.train_contrastive, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=True)
+        return DataLoader(self.train_contrastive, batch_size=self.batch_size, num_workers=self.hyparams.workers, pin_memory=True, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_data, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False) # Only used for evaluation.
+        return DataLoader(self.val_data, batch_size=self.batch_size, num_workers=self.hyparams.workers, pin_memory=True, shuffle=False) # Only used for evaluation.
 
     def test_dataloader(self):
-        return DataLoader(self.test_data, batch_size=self.batch_size, num_workers=self.hparams.workers, pin_memory=True, shuffle=False)
+        return DataLoader(self.test_data, batch_size=self.batch_size, num_workers=self.hyparams.workers, pin_memory=True, shuffle=False)
 
 
 class NoisyCLIP(LightningModule):
@@ -149,27 +149,30 @@ class NoisyCLIP(LightningModule):
         These label skethes are then used to retrieve the predicted labels for the input images.
         """
         super(NoisyCLIP, self).__init__()
-        self.hparams = args
-        self.world_size = self.hparams.num_nodes * self.hparams.gpus
+        self.hyparams = args
+        self.world_size = self.hyparams.num_nodes * self.hyparams.gpus
 
         #(1) Load the correct dataset class names
-        if self.hparams.dataset.lower() == "imagenet100" or self.hparams.dataset.lower() == "imagenet-100" or self.hparams.dataset.lower() == 'imagenet':
+        if self.hyparams.dataset.lower() == "imagenet100" or self.hyparams.dataset.lower() == "imagenet-100" or self.hyparams.dataset.lower() == 'imagenet':
             self.text_list = ['A photo of a '+label.strip().replace('_',' ') for label in text_labels]
         else:
             raise NotImplementedError('Handling of the dataset not implemented yet.')
 
-        if self.hparams.baseclip_type.startswith('RN'):
+        if self.hyparams.baseclip_type.startswith('RN'):
             embed_size = 512
         else:
             raise NotImplementedError('Unknown embedding size.')
 
 
         #(2) set up the teacher CLIP network - freeze it and don't use gradients!
-        self.baseclip = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0]
+        self.baseclip = clip.load(self.hyparams.baseclip_type, self.hyparams.device, jit=False)[0]
         self.baseclip.eval()
         self.baseclip.requires_grad_(False)
-        if not self.hparams.sketch_size == "None":
-            self.random_on_clean = torch.randn(self.hparams.num_classes, self.hparams.sketch_size)
+        if not self.hyparams.sketch_size == "None":
+            self.random_on_clean = torch.nn.Linear(self.hyparams.num_classes, self.hyparams.sketch_size, bias=False)
+            torch.nn.init.normal_(self.random_on_clean.weight, mean=0, std = 1/np.sqrt(self.hyparams.sketch_size))
+            for p in self.random_on_clean.parameters():
+                p.requires_grad = False
 
         self.text_features = self.baseclip.encode_text(clip.tokenize(self.text_list))
         self.text_features = self.text_features / self.text_features.norm(dim=-1, keepdim=True)
@@ -177,15 +180,15 @@ class NoisyCLIP(LightningModule):
         self.text_features.requires_grad_(False)
 
         #(3) set up the student CLIP network - unfreeze it and use gradients!
-        self.noisy_visual_encoder = clip.load(self.hparams.baseclip_type, self.hparams.device, jit=False)[0].visual
+        self.noisy_visual_encoder = clip.load(self.hyparams.baseclip_type, self.hyparams.device, jit=False)[0].visual
         self.noisy_visual_encoder.train()
 
-        if self.hparams.sketch_size == "None":
-            self.extra_layer = torch.nn.Linear(embed_size, self.hparams.num_classes, bias=False)
+        if self.hyparams.sketch_size == "None":
+            self.extra_layer = torch.nn.Linear(embed_size, self.hyparams.num_classes, bias=False)
             with torch.no_grad():
                 self.extra_layer.weight.copy_(self.text_features.T)
         else:
-            self.extra_layer = torch.nn.Linear(embed_size, self.hparams.sketch_size, bias=False)
+            self.extra_layer = torch.nn.Linear(embed_size, self.hyparams.sketch_size, bias=False)
             with torch.no_grad():
                 self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
 
@@ -205,34 +208,34 @@ class NoisyCLIP(LightningModule):
         """
 
         # MSE loss between Logit sketches.
-        if self.hparams.loss_type == 'mse':
+        if self.hyparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
 
         # L1 loss between Logit sketches.
-        elif self.hparams.loss_type == 'l1':
+        elif self.hyparams.loss_type == 'l1':
             return F.l1_loss(input2, input1)
 
         # Contrastive losses between logit sketches.
-        elif self.hparams.loss_type.startswith('simclr_'):
-            assert self.hparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
+        elif self.hyparams.loss_type.startswith('simclr_'):
+            assert self.hyparams.loss_type in ['simclr_ss', 'simclr_st', 'simclr_both']
             # Various schemes for the negative examples
             teacher_embeds = input1 / input1.norm(dim=-1, keepdim=True)
             student_embeds = input2 / input2.norm(dim=-1, keepdim=True)
             # First compute positive examples by taking <S(x_i), T(x_i)>/T for all i
-            pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hparams.loss_tau
+            pos_term = (teacher_embeds * student_embeds).sum(dim=1) / self.hyparams.loss_tau
             # Then generate the negative term by constructing various similarity matrices
-            if self.hparams.loss_type == 'simclr_ss':
+            if self.hyparams.loss_type == 'simclr_ss':
                 cov = torch.mm(student_embeds, student_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
+                sim = torch.exp(cov / self.hyparams.loss_tau) # shape is [bsz, bsz]
                 neg_term = torch.log(sim.sum(dim=-1) - sim.diag())
-            elif self.hparams.loss_type == 'simclr_st':
+            elif self.hyparams.loss_type == 'simclr_st':
                 cov = torch.mm(student_embeds, teacher_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, bsz]
+                sim = torch.exp(cov / self.hyparams.loss_tau) # shape is [bsz, bsz]
                 neg_term = torch.log(sim.sum(dim=-1)) # Not removing the diagonal here!
             else:
                 cat_embeds = torch.cat([student_embeds, teacher_embeds])
                 cov = torch.mm(student_embeds, cat_embeds.t())
-                sim = torch.exp(cov / self.hparams.loss_tau) # shape is [bsz, 2 * bsz]
+                sim = torch.exp(cov / self.hyparams.loss_tau) # shape is [bsz, 2 * bsz]
                 # and take row-wise sums w/o diagonals and
                 neg_term = torch.log(sim.sum(dim=-1) - sim.diag())
             # Final loss is
@@ -243,8 +246,8 @@ class NoisyCLIP(LightningModule):
             raise ValueError('Loss function not understood.')
 
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hparams.lr)
-        num_steps = 126689 // (self.hparams.batch_size * self.hparams.gpus) #divide N_train by number of distributed iters
+        optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hyparams.lr)
+        num_steps = 126689 // (self.hyparams.batch_size * self.hyparams.gpus) #divide N_train by number of distributed iters
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=num_steps)
         return [optim], [sched]
 
@@ -269,10 +272,10 @@ class NoisyCLIP(LightningModule):
         label_sketch = self.encode_noisy_image(images)
 
         # If no sketch size is provided, then the student just outputs the logits.
-        if self.hparams.sketch_size == 'None':
+        if self.hyparams.sketch_size == 'None':
             out = F.softmax(label_sketch, dim=-1)
 
-        elif self.hparams.reconstruction == 'lasso':
+        elif self.hyparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
             image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
             for i in range(label_sketch.shape[0]):
@@ -281,7 +284,7 @@ class NoisyCLIP(LightningModule):
             # 3) apply softmax to force summation to 1.
             out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
 
-        elif self.hparams.reconstruction == 'adjoint':
+        elif self.hyparams.reconstruction == 'adjoint':
             # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
             out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.T.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
 
@@ -299,18 +302,18 @@ class NoisyCLIP(LightningModule):
         """
         image_clean, image_noisy, labels = train_batch
         with torch.no_grad():
-            if self.hparams.training_labels == 'clip':
+            if self.hyparams.training_labels == 'clip':
                 # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
                 self.baseclip.eval()
                 sketch_clean = self.baseclip.encode_image(image_clean.type(torch.float16))
                 sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
-                sketch_clean = self.hparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(image_clean.device))
+                sketch_clean = self.hyparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(image_clean.device))
                 sketch_clean = F.softmax(sketch_clean, dim=-1)
-                if not self.hparams.sketch_size == 'None':
-                    sketch_clean = torch.matmul(sketch_clean, self.random_on_clean.to(image_clean.device))
-            elif self.hparams.training_labels == 'truth':
+                if not self.hyparams.sketch_size == 'None':
+                    sketch_clean = self.random_on_clean(sketch_clean)
+            elif self.hyparams.training_labels == 'truth':
                 # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
-                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
+                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hyparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
 
         sketch_noisy = self.encode_noisy_image(image_noisy)
 
