@@ -29,11 +29,11 @@ subset_file_name: "imagenet100.txt"
 dataset_dir: "/tmp/imagenet100"
 logdir: "/tmp"
 
-batch_size: 256
+batch_size: 80
 
 workers: 12
 
-strategy: "dp"
+strategy: "ddp"
 
 #training
 max_epochs: 25

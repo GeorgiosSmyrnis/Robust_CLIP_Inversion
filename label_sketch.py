@@ -204,7 +204,7 @@ class NoisyCLIP(LightningModule):
         else:
             self.extra_layer = torch.nn.Linear(embed_size, self.hyparams.sketch_size, bias=False)
             with torch.no_grad():
-                self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean).T)
+                self.extra_layer.weight.copy_((self.text_features @ self.random_on_clean.weight.T).T)
 
         #(4) set up the training and validation accuracy metrics.
         self.train_top_1 = Accuracy(top_k=1)
@@ -261,7 +261,7 @@ class NoisyCLIP(LightningModule):
             raise ValueError('Loss function not understood.')
 
     def configure_optimizers(self):
-        optim = torch.optimizers.Adam(self.noisy_visual_encoder.parameters(), lr=self.hyparams.lr)
+        optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hyparams.lr)
         if self.hyparams.dataset.lower() == "imagenet100" or self.hyparams.dataset.lower() == "imagenet-100":
             N_train = 126689
         elif self.hyparams.dataset.lower() == 'imagenet':
@@ -298,35 +298,35 @@ class NoisyCLIP(LightningModule):
 
         elif self.hyparams.reconstruction == 'lasso':
             # 2) Solve a lasso reconstruction to retrieve the actual logits.
-            image_probs = torch.zeros(label_sketch.shape[0], self.random_on_clean.shape[0])
+            image_probs = torch.zeros(label_sketch.shape[0], self.hyparams.num_classes)
             for i in range(label_sketch.shape[0]):
-                image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.T.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
+                image_probs[i,:] = torch.FloatTensor(solve_lasso_on_simplex(self.random_on_clean.weight.detach().cpu().numpy(), label_sketch[i,:].detach().cpu().numpy()))
 
             # 3) apply softmax to force summation to 1.
             out = F.softmax(image_probs, dim=-1).to(label_sketch.device)
 
         elif self.hyparams.reconstruction == 'adjoint':
             # Adjoint method to retrieve logits. Results equivalent to one step of OMP for support recovery.
-            out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.T.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
+            out = F.softmax(torch.matmul(label_sketch, self.random_on_clean.weight.to(label_sketch.device)), dim=-1) # Note that this is not accurate beyond top-1!
 
         return out
 
-    def loss_clean_noisy(images_clean, images_noisy):
+    def loss_clean_noisy(self, images_clean, images_noisy):
         with torch.no_grad():
             if self.hyparams.training_labels == 'clip':
                 # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
                 self.clean_visual_encoder.eval()
-                sketch_clean = self.clean_visual_encoder(image_clean.type(torch.float16))
+                sketch_clean = self.clean_visual_encoder(images_clean.type(torch.float16))
                 sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
-                sketch_clean = self.hyparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(image_clean.device))
+                sketch_clean = self.hyparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(images_clean.device))
                 sketch_clean = F.softmax(sketch_clean, dim=-1)
                 if not self.hyparams.sketch_size == 'None':
                     sketch_clean = self.random_on_clean(sketch_clean)
             elif self.hyparams.training_labels == 'truth':
                 # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
-                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hyparams.num_classes).float(), self.random_on_clean.to(image_clean.device))
+                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hyparams.num_classes).float(), self.random_on_clean.to(images_clean.device))
 
-        sketch_noisy = self.encode_noisy_image(image_noisy)
+        sketch_noisy = self.encode_noisy_image(images_noisy)
         loss = self.criterion(sketch_clean, sketch_noisy)
         return loss
 
@@ -340,16 +340,16 @@ class NoisyCLIP(LightningModule):
             sketch_clean: A softmax(G T(xi)) where T() is the teacher, xi are clean images, A is iid gaussian and G is the text embedding matrix. Shape [N, sketch_size]
             sketch_noisy: S(yi) where S() is the student and yi are noisy images. Shape [N, sketch_size]
         """
-        image_clean, image_noisy, labels = train_batch
-        loss = self.loss_clean_noisy(image_clean, image_noisy)
-        self.log('train_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=True, on_epoch=True)
+        images_clean, images_noisy, labels = train_batch
+        train_loss = self.loss_clean_noisy(images_clean, images_noisy)
+        self.log('train_loss', train_loss, prog_bar=False, logger=True, sync_dist=True, on_step=True, on_epoch=True)
 
         with torch.no_grad():
             logits = self.forward(images_noisy)
         self.log('train_top_1_step', self.train_top_1(logits, labels), prog_bar=False, logger=False)
         self.log('train_top_5_step', self.train_top_5(logits, labels), prog_bar=False, logger=False)
 
-        return loss
+        return train_loss
 
     def training_epoch_end(self, outputs):
         self.log('train_top_1', self.train_top_1.compute(), prog_bar=True, logger=True)
@@ -365,8 +365,8 @@ class NoisyCLIP(LightningModule):
         Return these to be evaluated in validation step end.
         """
         images_clean, images_noisy, labels = test_batch
-        loss = self.loss_clean_noisy(image_clean, image_noisy)
-        self.log('val_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=False, on_epoch=True)
+        val_loss = self.loss_clean_noisy(images_clean, images_noisy)
+        self.log('val_loss', val_loss, prog_bar=False, logger=True, sync_dist=True, on_step=False, on_epoch=True)
 
         logits = self.forward(images_noisy)
         self.log('val_top_1_step', self.val_top_1(logits, labels), prog_bar=False, logger=False)
@@ -384,8 +384,8 @@ class NoisyCLIP(LightningModule):
     # Test methods - same as validation, just with different metric aggregator
     def test_step(self, test_batch, batch_idx):
         images_clean, images_noisy, labels = test_batch
-        loss = self.loss_clean_noisy(image_clean, image_noisy)
-        self.log('test_loss', loss, prog_bar=False, logger=True, sync_dist=True, on_step=False, on_epoch=True)
+        test_loss = self.loss_clean_noisy(images_clean, images_noisy)
+        self.log('test_loss', test_loss, prog_bar=False, logger=True, sync_dist=True, on_step=False, on_epoch=True)
 
         logits = self.forward(images_noisy)
         self.log('test_top_1_step', self.test_top_1(logits, labels), prog_bar=False, logger=False)
@@ -436,8 +436,9 @@ def run_noisy_clip():
 
     directory = os.path.join(args.logdir, 'NoisyCLIP_Logs', args.experiment_name, 'checkpoints')
     path = os.path.join(directory, os.listdir(directory)[0])
-    model = NoisyCLIP.load_from_checkpoint(path, text_labels=dataset.text_labels)
-    trainer.test(model, datamodule=dataset)
+    model = NoisyCLIP.load_from_checkpoint(path, args=args, text_labels=dataset.text_labels)
+    trainer.test(model, dataloaders=dataset.train_dataloader())
+    trainer.test(model, dataloaders=dataset.test_dataloader())
 
 
 def grab_config():
