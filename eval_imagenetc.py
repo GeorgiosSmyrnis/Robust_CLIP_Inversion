@@ -28,19 +28,20 @@ class ImageNet100CTest(LightningDataModule):
     def __init__(self, args, distortion, sub_distortion, level):
         super(ImageNet100CTest, self).__init__()
 
-        self.hparams = args
+        self.hyparams = args
 
         self.distortion = distortion
         self.sub_distortion = sub_distortion
         self.level = level
 
-        self.dataset_dir = self.hparams.dataset_dir
+        self.dataset_dir = '/tmp/ImageNet100C'
+        self.hyparams.dataset_dir = '/tmp/ImageNet100C'
 
-        self.val_set_transform = ImageNetBaseTransformVal(self.hparams)
+        self.val_set_transform = ImageNetBaseTransformVal(self.hyparams)
 
     def setup(self, stage=None):
         self.val_data = ImageNet100C(
-            root=self.hparams.dataset_dir,
+            root=self.hyparams.dataset_dir,
             distortion=self.distortion,
             sub_distortion=self.sub_distortion,
             level = self.level,
@@ -48,7 +49,7 @@ class ImageNet100CTest(LightningDataModule):
         )
 
     def test_dataloader(self):
-        return DataLoader(self.val_data, batch_size=512, num_workers=self.hparams.workers, worker_init_fn=(lambda wid: np.random.seed(int(torch.rand(1)[0]*1e6) + wid)), pin_memory=True, shuffle=False)
+        return DataLoader(self.val_data, batch_size=512, num_workers=self.hyparams.workers, worker_init_fn=(lambda wid: np.random.seed(int(torch.rand(1)[0]*1e6) + wid)), pin_memory=True, shuffle=False)
 
 
 def grab_config():
@@ -66,11 +67,12 @@ def grab_config():
 
 def noise_level_eval():
     args = grab_config()
-    args.gpus = [0] # Force evaluation in a single gpu.
+    args.gpus = [1] # Force evaluation in a single gpu.
 
     seed_everything(args.seed)
     base_dataset = ImageNetCLIPDataset(args)
-
+    base_dataset.setup()
+    results_dir = './results'
 
     logger = TensorBoardLogger(
         save_dir=args.logdir,
@@ -79,8 +81,8 @@ def noise_level_eval():
     )
     trainer = Trainer.from_argparse_args(args, logger=logger)
 
-    if not os.path.exists(os.path.join(args.results_dir, args.experiment_name)):
-        os.mkdir(os.path.join(args.results_dir, args.experiment_name))
+    if not os.path.exists(os.path.join(results_dir, args.experiment_name)):
+        os.mkdir(os.path.join(results_dir, args.experiment_name))
 
     for distortion in DISTORTIONS:
         print(distortion)
@@ -89,16 +91,16 @@ def noise_level_eval():
             top_1_list = []
             top_5_list = []
 
-            if not os.path.exists(os.path.join(args.results_dir, args.experiment_name, distortion)):
-                os.makedirs(os.path.join(args.results_dir, args.experiment_name, distortion))
+            if not os.path.exists(os.path.join(results_dir, args.experiment_name, distortion)):
+                os.makedirs(os.path.join(results_dir, args.experiment_name, distortion))
 
             for level in LEVELS:
                 print(level)
 
                 #Choose the appropriate model based on type, and load from checkpoint.
-                directory = os.path.join('./Logs', args.experiment_name, 'checkpoints')
+                directory = os.path.join('./Logs_Var2', args.experiment_name, 'checkpoints')
                 path = os.listdir(directory)[0]
-                saved_model = NoisyCLIP.load_from_checkpoint(path, args=args, text_labels=base_dataset.text_labels)
+                saved_model = NoisyCLIP.load_from_checkpoint(os.path.join(directory,path), args=args, text_labels=base_dataset.text_labels)
 
                 #Load the appropriate data and run the test once with the saved model
                 test_data = ImageNet100CTest(args, distortion=distortion, sub_distortion=sub_distortion, level=level)
@@ -112,10 +114,10 @@ def noise_level_eval():
                 top_1_list.extend([top1_accs])
                 top_5_list.extend([top5_accs])
 
-                with open(os.path.join(args.results_dir, args.experiment_name, distortion, sub_distortion + '.out'), 'a+') as f:
+                with open(os.path.join(results_dir, args.experiment_name, distortion, sub_distortion + '.out'), 'a+') as f:
                     f.write(level + ':\t{0:.4f}'.format(top1_accs) + '\t{0:.4f}\n'.format(top5_accs))
 
-            with open(os.path.join(args.results_dir, args.experiment_name, distortion, sub_distortion + '.out'), 'a+') as f:
+            with open(os.path.join(results_dir, args.experiment_name, distortion, sub_distortion + '.out'), 'a+') as f:
                 f.write('MEAN:\t{0:.4f}\t{1:.4f}\n'.format(np.mean(top_1_list), np.mean(top_5_list)))
 
 if __name__ == "__main__":

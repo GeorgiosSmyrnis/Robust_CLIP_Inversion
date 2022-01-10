@@ -33,7 +33,7 @@ batch_size: 80
 
 workers: 12
 
-distributed_backend: "ddp"
+strategy: "ddp"
 
 #training
 max_epochs: 25
