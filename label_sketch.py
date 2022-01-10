@@ -222,9 +222,9 @@ class NoisyCLIP(LightningModule):
             input2: Logit sketches of the noisy images from the student. Size [N, sketch_size].
         """
         if self.hyparams.loss_type == 'cross':
-            target = input1
-            preds = F.log_softmax(input2, dim=-1)
-            return (-1.0/input1.shape[0])*torch.sum(target * preds)
+            target = input1 # Target is the clean images
+            preds = input2
+            return F.cross_entropy(preds, target)
 
         # MSE loss between Logit sketches.
         elif self.hyparams.loss_type == 'mse':
@@ -341,15 +341,15 @@ class NoisyCLIP(LightningModule):
                     self.clean_visual_encoder.eval()
                     logit_clean = self.clean_visual_encoder(images_clean.type(torch.float16))
                     logit_clean = logit_clean / logit_clean.norm(dim=-1, keepdim=True)
-                    logit_clean = self.hyparams.sharpening * torch.matmul(logit_clean, self.text_features.to(images_clean.device))
-                    probs_clean = F.softmax(logit_clean, dim=-1)
+                    logit_clean = torch.matmul(logit_clean, self.text_features.to(images_clean.device))
+                    preds_clean = torch.argmax(logit_clean, dim=-1)
 
                 elif self.hyparams.training_labels == 'truth':
                     # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
-                    logit_clean = F.one_hot(labels, num_classes=self.hyparams.num_classes).float()
+                    logit_clean = labels
 
             logit_noisy = self.forward(images_noisy)
-            loss = self.criterion(probs_clean, logit_noisy)
+            loss = self.criterion(preds_clean, logit_noisy)
         return loss
 
 
