@@ -221,9 +221,11 @@ class NoisyCLIP(LightningModule):
             input1: Logit sketches of the clean images from the teacher. Size [N, sketch_size].
             input2: Logit sketches of the noisy images from the student. Size [N, sketch_size].
         """
+        if self.hyparams.loss_type == 'cross':
+
 
         # MSE loss between Logit sketches.
-        if self.hyparams.loss_type == 'mse':
+        elif self.hyparams.loss_type == 'mse':
             return F.mse_loss(input2, input1)
 
         # L1 loss between Logit sketches.
@@ -312,22 +314,40 @@ class NoisyCLIP(LightningModule):
         return out
 
     def loss_clean_noisy(self, images_clean, images_noisy):
-        with torch.no_grad():
-            if self.hyparams.training_labels == 'clip':
-                # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
-                self.clean_visual_encoder.eval()
-                sketch_clean = self.clean_visual_encoder(images_clean.type(torch.float16))
-                sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
-                sketch_clean = self.hyparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(images_clean.device))
-                sketch_clean = F.softmax(sketch_clean, dim=-1)
-                if not self.hyparams.sketch_size == 'None':
-                    sketch_clean = self.random_on_clean(sketch_clean)
-            elif self.hyparams.training_labels == 'truth':
-                # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
-                sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hyparams.num_classes).float(), self.random_on_clean.to(images_clean.device))
+        if not self.hyparams.loss_type == 'cross':
+            with torch.no_grad():
+                if self.hyparams.training_labels == 'clip':
+                    # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
+                    self.clean_visual_encoder.eval()
+                    sketch_clean = self.clean_visual_encoder(images_clean.type(torch.float16))
+                    sketch_clean = sketch_clean / sketch_clean.norm(dim=-1, keepdim=True)
+                    sketch_clean = self.hyparams.sharpening * torch.matmul(sketch_clean, self.text_features.to(images_clean.device))
+                    sketch_clean = F.softmax(sketch_clean, dim=-1)
+                    if not self.hyparams.sketch_size == 'None':
+                        sketch_clean = self.random_on_clean(sketch_clean)
+                elif self.hyparams.training_labels == 'truth':
+                    # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
+                    sketch_clean = torch.matmul(F.one_hot(labels, num_classes=self.hyparams.num_classes).float(), self.random_on_clean.to(images_clean.device))
 
-        sketch_noisy = self.encode_noisy_image(images_noisy)
-        loss = self.criterion(sketch_clean, sketch_noisy)
+            sketch_noisy = self.encode_noisy_image(images_noisy)
+            loss = self.criterion(sketch_clean, sketch_noisy)
+
+        else:
+            with torch.no_grad():
+                if self.hyparams.training_labels == 'clip':
+                    # If using the logits provided by the teacher, calculate them and sketch them using the random projection matrix.
+                    self.clean_visual_encoder.eval()
+                    logit_clean = self.clean_visual_encoder(images_clean.type(torch.float16))
+                    logit_clean = logit_clean / logit_clean.norm(dim=-1, keepdim=True)
+                    logit_clean = self.hyparams.sharpening * torch.matmul(logit_clean, self.text_features.to(images_clean.device))
+                    logit_clean = F.softmax(logit_clean, dim=-1)
+
+                elif self.hyparams.training_labels == 'truth':
+                    # If using the ground truth labels, treat them as one-hot encoded logits and then use the random projection matrix.
+                    logit_clean = F.one_hot(labels, num_classes=self.hyparams.num_classes).float()
+
+            logit_noisy = self.forward(images_noisy)
+            loss = self.criterion(logit_clean, logit_noisy)
         return loss
 
 
