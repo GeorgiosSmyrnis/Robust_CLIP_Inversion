@@ -1,6 +1,6 @@
 seed: 1234
 
-experiment_name: "rand90_cross_50"
+experiment_name: "rand90_cross_50_long_both"
 
 num_nodes: 1
 gpus: 4
@@ -17,9 +17,9 @@ fixed_mask: False
 percent_missing: 0.90
 sketch_size: 50
 
-lr: 0.00005
+lr: 0.0001
 weight_decay: 0.0001
-sharpening: 1000
+sharpening: 1
 loss_tau: 0.1
 
 dataset: "Imagenet-100"
