@@ -215,7 +215,7 @@ class NoisyCLIP(LightningModule):
         self.test_top_5 = Accuracy(top_k=5)
         torch.cuda.empty_cache()
 
-    def criterion(self, input1, input2):
+    def criterion(self, input1, input2, reg_logits=None):
         """
         Args:
             input1: Logit sketches of the clean images from the teacher. Size [N, sketch_size].
@@ -224,7 +224,15 @@ class NoisyCLIP(LightningModule):
         if self.hyparams.loss_type == 'cross':
             target = input1 # Target is the clean images
             preds = input2
-            return F.cross_entropy(preds, target)
+            if reg_logits is None:
+                return F.cross_entropy(preds, target)
+            else:
+                loss_term_1 = F.cross_entropy(preds, target)
+                transf_logits = self.random_on_clean(reg_logits)
+                transf_logits_dists = F.pdist(transf_logits)
+                reg_logits_dists = F.pdist(reg_logits)
+                loss_term_2 = torch.pow(transf_logits_dists - reg_logits_dists, 2).mean(dim=-1)
+                return loss_term_1 + loss_term_2
 
         # MSE loss between Logit sketches.
         elif self.hyparams.loss_type == 'mse':
@@ -267,7 +275,7 @@ class NoisyCLIP(LightningModule):
     def configure_optimizers(self):
         optim = torch.optim.Adam(self.noisy_visual_encoder.parameters(), lr=self.hyparams.lr)
         if self.hyparams.dataset.lower() == "imagenet100" or self.hyparams.dataset.lower() == "imagenet-100":
-            N_train = 126689
+            N_train = 126689 - 5000
         elif self.hyparams.dataset.lower() == 'imagenet':
             N_train = 95000
         else:
@@ -349,7 +357,7 @@ class NoisyCLIP(LightningModule):
                     preds_clean = labels
 
             logit_noisy = self.forward(images_noisy)
-            loss = self.criterion(preds_clean, logit_noisy)
+            loss = self.criterion(preds_clean, logit_noisy, reg_logits=logit_clean)
         return loss
 
 
